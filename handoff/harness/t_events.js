@@ -5,7 +5,7 @@ const { setup, terrain } = require('./sim');
 (async () => {
   const r = await setup();
   const w = r.w, H2 = w.H2;
-  terrain(r, { trees: [] });   // keep the lake (drinking water); no trees blocking the travel corridor
+  terrain(r);                      // default terrain: proven to keep villages healthy (water + wood)
   w.paused = false; w.manualPaused = false;
 
   const log = (...a) => console.log(...a);
@@ -34,6 +34,18 @@ const { setup, terrain } = require('./sim');
   // ===================== TRADE ==========================================
   log('\n=== TRADE ===');
   calm();
+  // open a tree-free walking corridor between the two towns so a caravan can travel
+  const clearCorridor = () => {
+    const x0 = Math.max(1, Math.min(A.x, B.x) - 4), x1 = Math.min(w.width - 1, Math.max(A.x, B.x) + 4);
+    for (let x = x0; x <= x1; x++) {
+      const gy = groundAt(x);
+      for (let y = Math.max(2, gy - 9); y <= gy; y++) {
+        const px = w.pixelMap[x] && w.pixelMap[x][y];
+        if (px && ['wood', 'plant', 'leaf', 'tree_branch', 'seed'].includes(px.element)) w.deletePixel(x, y);
+      }
+    }
+  };
+  clearCorridor();
   // create a strong surplus/shortage so a caravan is worthwhile
   A.stock.wood = 260; A.stock.stone = 180; A.stock.coin = 300;
   B.stock.wood = 0; B.stock.stone = 2; B.stock.coin = 300; B.stock.bread = 80; B.stock.grain = 60;
@@ -48,7 +60,7 @@ const { setup, terrain } = require('./sim');
   const routes0 = H2.trade.routes.length;
   // let jobThink drive the merchant naturally (it re-issues the caravan each day after sleep)
   for (let i = 0; i < 90 && H2.trade.routes.length === routes0; i++) {
-    calm();
+    calm(); clearCorridor();
     let p = pickMerchant();
     if (p && p.job !== 'merchant') H2.setJob(p, 'merchant');
     r.run(120);
