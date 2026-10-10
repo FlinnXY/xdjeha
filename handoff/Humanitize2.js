@@ -13,7 +13,7 @@ if (window.H2 && window.H2.loaded) { console.warn("[Humanitize2] already loaded"
 /* ------------------------------------------------------------------ CONFIG */
 const H2 = window.H2 = {
   version: "2.0.0", loaded: true,
-  cfg: { events: true, maxPeople: 90, verbose: false, birth: true, war: true, speed: 1 },
+  cfg: { events: true, maxPeople: 1000, maxPerFaction: 500, townSize: 60, expand: true, verbose: false, birth: true, war: true, speed: 1 },
   people: [], byId: {}, st: {}, cols: [], colSeq: 1, idSeq: 1, doors: [], chron: [],
   sightings: [], projectiles: 0, stats: { births: 0, deaths: 0, battles: 0 },
 };
@@ -90,7 +90,7 @@ function kindOf(o) {
   if (!o) return 0;
   const e = elements[o.element];
   if (!e) return 2;
-  if (o.element === "hz_door" || o.element === "hz_gate") return 3;
+  if (e.door || e.pass) return 3;
   if (o.burning || o.temp > HAZ_TEMP_HI || o.temp < HAZ_TEMP_LO) return 4;
   if (e.hazard) return 4;
   if (e.state === "liquid" || e.state === "gas") return 1;
@@ -133,9 +133,9 @@ H2.nearestOf = nearestOf;
 function findNear(x, y, r, test, step) {
   let best = null, bd = 1e9; step = step || 1;
   for (let dx = -r; dx <= r; dx += step) {
-    const xx = x + dx; if (xx < 0 || xx > width) continue;
+    const xx = x + dx; if (xx < 0 || xx >= width) continue;
     for (let dy = -r; dy <= r; dy += step) {
-      const yy = y + dy; if (yy < 0 || yy > height) continue;
+      const yy = y + dy; if (yy < 0 || yy >= height) continue;
       const o = pixelMap[xx][yy]; if (!o || o.del) continue;
       if (test(o)) { const d = Math.abs(dx) + Math.abs(dy); if (d < bd) { bd = d; best = o; } }
     }
@@ -198,8 +198,8 @@ station("hz_stall", "market", { color: ["#e8b84a","#d9a73a","#f0c85a"], density:
 station("hz_banner", "hall", { color: "#3b82f6", density: 300, burn: 30, burnTime: 150, burnInto: "ash", hardness: 0.1, bhp: 10,
   hoverStat: (p) => (FAC[p.fac] ? FAC[p.fac].name + " banner" : "banner") });
 station("hz_anvil", "forge", { color: ["#3f4247","#34373b"], density: 7800, hardness: 0.8, bhp: 60 });
-station("hz_forgefire", "forgefire", { color: ["#ff6a00","#ffa31a","#ff3b00"], density: 800, hardness: 0.4, temp: 130, bhp: 25,
-  tick: (p) => { p.temp = 130; if (pixelTicks % 4 === 0) p.color = pick(["#ff6a00","#ffa31a","#ff3b00","#ffd24a"]); doHeat(p);
+station("hz_forgefire", "forgefire", { color: ["#ff6a00","#ffa31a","#ff3b00"], density: 800, hardness: 0.4, temp: 90, bhp: 25,
+  tick: (p) => { p.temp = 90; if (pixelTicks % 4 === 0) p.color = pick(["#ff6a00","#ffa31a","#ff3b00","#ffd24a"]); doHeat(p);
     if (isEmpty(p.x, p.y - 1) && rnd() < 0.03) createPixel("smoke", p.x, p.y - 1); } });
 station("hz_oven", "oven", { color: ["#9b5a3c","#8a4e33"], density: 1500, hardness: 0.4, temp: 80, bhp: 25,
   tick: (p) => { p.temp = 80; doHeat(p); } });
@@ -240,6 +240,92 @@ def("hz_crop", { color: "#5cae3a", density: 300, hardness: 0.02, burn: 60, burnT
       if (pixelTicks % 20 === 0) p.color = p.g < 0.35 ? "#6dbb43" : p.g < 0.7 ? "#9bc13a" : p.g < 1 ? "#d3b83a" : "#e6bf3c";
     }
   } });
+
+// ---- architecture & decoration (colours are set per pixel from the faction's building style)
+def("hz_plaster", { color: ["#efe8d6","#e9e1cc"], behavior: behaviors.WALL, density: 1800, hardness: 0.35, bhp: 22, hzb: true, forceSaveColor: true,
+  breakInto: ifEl("dust", "dirt"), tempHigh: 1300, stateHigh: ifEl("magma", "ash"), desc: "Plastered wall of a village building." });
+def("hz_beam", { color: ["#4a3122","#553826"], behavior: behaviors.WALL, density: 700, hardness: 0.3, bhp: 16, hzb: true, forceSaveColor: true,
+  burn: 18, burnTime: 260, burnInto: ["ash","ash","fire"], tempHigh: 450, stateHigh: "ash", breakInto: ifEl("sawdust","ash"), desc: "Timber framing." });
+def("hz_window", { color: ["#cfe8f7","#bcdcf0"], behavior: behaviors.WALL, density: 2500, hardness: 0.1, bhp: 3, hzb: true, forceSaveColor: true,
+  breakInto: ifEl("glass_shard", "glass"), tempHigh: 1500, stateHigh: ifEl("molten_glass", "glass"), desc: "A window. Lights up warmly at night.",
+  tick: (p) => windowTick(p) });
+def("hz_shutter", { color: ["#2f5fa8","#2e6b52"], behavior: behaviors.WALL, density: 600, hardness: 0.2, bhp: 8, hzb: true, forceSaveColor: true,
+  burn: 25, burnTime: 150, burnInto: "ash", tempHigh: 400, stateHigh: "ash" });
+def("hz_flowerbox", { color: ["#e0457b","#f4d03f","#3f8f2a"], behavior: behaviors.WALL, density: 500, hardness: 0.1, bhp: 4, hzb: true, forceSaveColor: true,
+  burn: 40, burnTime: 80, burnInto: "ash", tempHigh: 300, stateHigh: "ash", desc: "Window box full of flowers." });
+def("hz_chimney", { color: ["#7d6a5c","#8a7566"], behavior: behaviors.WALL, density: 2200, hardness: 0.5, bhp: 30, hzb: true, forceSaveColor: true,
+  breakInto: ifEl("brick_rubble", "gravel"), tempHigh: 1400, stateHigh: ifEl("magma", "ash"),
+  tick: (p) => { if ((pixelTicks + p.x) % 13 !== 0 || !elements.smoke) return; const cold = p.temp < 15 || isNight(); if (rnd() < (cold ? 0.22 : 0.06) && isEmpty(p.x, p.y - 1)) createPixel("smoke", p.x, p.y - 1); } });
+def("hz_lantern", { color: ["#ffd36b","#ffb84a"], behavior: behaviors.WALL, density: 1500, hardness: 0.2, bhp: 4, hzb: true, forceSaveColor: true,
+  breakInto: ifEl("glass_shard", "glass"), desc: "A lantern that is lit at dusk.", tick: (p) => lanternTick(p) });
+def("hz_gold", { color: ["#e2b33c","#d4a12a","#f0c75a"], behavior: behaviors.WALL, density: 3000, hardness: 0.4, bhp: 20, hzb: true, forceSaveColor: true, desc: "Gilded ornament." });
+def("hz_statue", { color: ["#d9d6cf","#cfcbc2"], behavior: behaviors.WALL, density: 2600, hardness: 0.6, bhp: 40, hzb: true, forceSaveColor: true,
+  breakInto: ifEl("gravel", "rock"), hoverStat: (p) => p.nm ? "statue of " + p.nm : "statue" });
+def("hz_spray", { color: ["#a8dcff","#d6f0ff","#7cc4f5"], behavior: behaviors.WALL, density: 1000, hardness: 0, bhp: 2, hzb: true, pass: true, forceSaveColor: true,
+  desc: "Fountain spray.", tick: (p) => { if ((pixelTicks + p.y) % 6 === 0) p.color = pick(["rgb(168,220,255)","rgb(214,240,255)","rgb(124,196,245)","rgb(240,250,255)"]); } });
+// walk-through pieces: people pass through them like an open archway (they swing aside for a moment, like doors)
+def("hz_stair", { color: ["#8a6440","#7e5a38"], behavior: behaviors.WALL, density: 600, hardness: 0.25, bhp: 14, hzb: true, pass: true, stair: true, forceSaveColor: true,
+  burn: 20, burnTime: 220, burnInto: "ash", tempHigh: 450, stateHigh: "ash", desc: "Staircase to an upper floor." });
+def("hz_lamppost", { color: ["#2b2b30","#33333a"], behavior: behaviors.WALL, density: 3000, hardness: 0.5, bhp: 16, hzb: true, pass: true, forceSaveColor: true, desc: "Street lamp post." });
+def("hz_flower", { color: ["#e0457b","#f4d03f","#ffffff","#b05cc8"], behavior: behaviors.WALL, density: 200, hardness: 0.01, bhp: 1, hzb: true, pass: true, forceSaveColor: true,
+  burn: 60, burnTime: 40, burnInto: "ash", tempHigh: 200, stateHigh: "ash", desc: "Garden flowers planted by villagers." });
+// the back wall of a room seen in cut-away: people walk in front of it (it makes way for them like a curtain)
+def("hz_interior", { color: ["#cfc6b2","#c6bca6"], behavior: behaviors.WALL, density: 1500, hardness: 0.3, bhp: 14, hzb: true, pass: true, forceSaveColor: true,
+  breakInto: ifEl("dust", "dirt"), tempHigh: 1300, stateHigh: ifEl("magma", "ash"), desc: "Back wall of a room (people walk in front of it)." });
+def("hz_backwin", { color: ["#bcd6e6","#aecbdc"], behavior: behaviors.WALL, density: 2500, hardness: 0.1, bhp: 3, hzb: true, pass: true, forceSaveColor: true,
+  breakInto: ifEl("glass_shard", "glass"), tempHigh: 1500, stateHigh: ifEl("molten_glass", "glass"), desc: "A window in the back wall. Lights up at night.",
+  tick: (p) => windowTick(p) });
+def("hz_plinth", { color: ["#bdb7aa","#b0aa9d"], behavior: behaviors.WALL, density: 2400, hardness: 0.55, bhp: 30, hzb: true, pass: true, forceSaveColor: true,
+  breakInto: ifEl("gravel", "rock"), desc: "Archway / plinth that people can walk under." });
+const WARM_IN = ["rgb(224,160,74)","rgb(210,146,66)","rgb(236,176,92)"];
+const WARM = ["rgb(255,214,120)","rgb(255,200,96)","rgb(255,226,150)"];
+function nightId() { const f = dayFrac(); return Math.floor(pixelTicks / DAY) + (f < 0.06 ? 0 : 1); }
+function windowTick(p) {
+  if ((pixelTicks + p.x * 7 + p.y * 3) % 24 !== 0) return;
+  if (p.dc === undefined) p.dc = p.color;
+  if (isNight() || isEvening() && dayFrac() > 0.66) {
+    const n = nightId();
+    if (p.ln !== n) { p.ln = n; p.on = rnd() < 0.7; }
+    if (p.on && dayFrac() > 0.92 && rnd() < 0.08) p.on = false;          // late night: lights go out one by one
+    p.color = p.on ? (p.element === "hz_backwin" ? pick(WARM_IN) : pick(WARM)) : "rgb(42,53,80)";
+  } else if (p.color !== p.dc) p.color = p.dc;
+}
+function lanternTick(p) {
+  if ((pixelTicks + p.x) % 8 !== 0) return;
+  if (p.dc === undefined) p.dc = "rgb(110,96,70)";
+  const lit = isNight() || isEvening() || p.temp > 400;
+  p.color = lit ? pick(["rgb(255,211,107)","rgb(255,184,74)","rgb(255,226,140)"]) : p.dc;
+  if (lit) p.glow = true; else delete p.glow;
+}
+
+// ---- forestry: villagers plant saplings that grow into modest trees made of ordinary wood + leaves
+const TREE_SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, clay_soil: 1, mycelium: 1 };
+def("hz_sapling", { color: ["#3f8f2a","#4a9e33"], behavior: behaviors.WALL, density: 300, hardness: 0.02, burn: 60, burnTime: 60, burnInto: "ash", bhp: 2,
+  forceSaveColor: true, properties: { g: 0 }, desc: "A young tree planted by a woodcutter. Grows into a small tree.",
+  hoverStat: (p) => "growing " + Math.floor((p.g || 0) * 100) + "%",
+  tick: (p) => {
+    doBurning(p); if (p.del) return;
+    const b = at(p.x, p.y + 1);
+    if (!b) { tryMove(p, p.x, p.y + 1); return; }
+    if (!TREE_SOIL[b.element]) { if (rnd() < 0.002) deletePixel(p.x, p.y); return; }
+    if (pixelTicks % 10 !== 0) return;
+    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.0006 : 0.0035);
+    if (p.g < 1) return;
+    growTree(p);
+  } });
+function growTree(p) {
+  const x = p.x, y = p.y, H = 4 + (x * 7 + y) % 3;
+  for (let k = 0; k <= H + 2; k++) if (!inb(x, y - k) || (k > 0 && pixelMap[x][y - k])) { p.g = 0.9; return false; }   // no room yet
+  changePixel(p, "wood", false);
+  for (let k = 1; k <= H; k++) createPixel("wood", x, y - k);
+  const top = y - H;
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 0; dy++) {
+    if (Math.abs(dx) + Math.abs(dy) > 2 || (!dx && !dy)) continue;
+    const xx = x + dx, yy = top + dy; if (inb(xx, yy) && !pixelMap[xx][yy]) createPixel("plant", xx, yy);
+  }
+  if (inb(x, top - 1) && !pixelMap[x][top - 1]) createPixel("plant", x, top - 1);
+  return true;
+}
 
 // ---- projectiles
 def("hz_arrow", { color: "#6b5436", behavior: behaviors.WALL, density: 300, hardness: 0, bhp: 1, hidden: true, forceSaveColor: true,
@@ -345,14 +431,23 @@ function canEnter(x, y, p, soft) {
   if (k === 3) return doorOpenable(p, o);
   return false;
 }
+let SHIFT_DY = 0;
+// is the person heading for somewhere above them (e.g. a bed upstairs)? then stairs are steps, not an archway
+function goingUp(p) { return p.tgy !== undefined && pixelTicks - (p.tgT || 0) < 30 && p.tgy < p.y - 1; }
 function doorOpenable(p, o) {
   if (!p) return false;
+  const e = elements[o.element];
+  if (e && e.stair) return SHIFT_DY === 0 && !goingUp(p);
+  if (e && e.pass) return true;
   if (o.element === "hz_gate") return o.fac === undefined || o.fac === p.fac;
   return o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || H2.truce;
 }
 function put(px, x, y) { let o = pixelMap[x][y]; if (o && isSoft(o)) { deletePixel(x, y); o = null; } if (!o) movePixel(px, x, y); else swapPixels(px, o); }
+const DOOR_KEEP = ["fac", "color", "hp", "ay", "sx", "uf", "cid", "nm", "dc", "dec"];
 function openDoor(o) {
-  H2.doors.push({ x: o.x, y: o.y, el: o.element, fac: o.fac, color: o.color, hp: o.hp, ay: o.ay, t: pixelTicks + 14 });
+  const r = { x: o.x, y: o.y, el: o.element, t: pixelTicks + 14, keep: {} };
+  for (const k of DOOR_KEEP) if (o[k] !== undefined) r.keep[k] = o[k];
+  H2.doors.push(r);
   o.quiet = true;
   deletePixel(o.x, o.y);
 }
@@ -360,6 +455,25 @@ function openDoorsFor(p, tx, ty) {
   const o = inb(tx, ty) ? pixelMap[tx][ty] : null;
   if (o && kindOf(o) === 3 && doorOpenable(p, o)) openDoor(o);
 }
+function canSlipPast(p, ob) {
+  if (ob.sleeping || ob.id === undefined) return ob.dead && !ob.sleeping;
+  if (!(ob.dead || ob.fac === p.fac || ob.fac === undefined || (ob.nomad && !hostileFac(p, ob)))) return false;
+  if (ob.wantDir === Math.sign(ob.x - p.x) && pixelTicks - (ob.wantT || -99) < 14) return false;   // they walk the same way: just follow
+  const busy = pixelTicks - (ob.wantT || -99) > 6 && ob.task && ob.task.k !== "wander";
+  if (busy && p.tgx !== undefined && Math.abs(p.tgx - ob.x) <= 1 && Math.abs((p.tgyy === undefined ? ob.y : p.tgyy) - ob.y) <= 2) return false;   // that's their spot
+  return true;
+}
+function hostileFac(p, q) { return H2.war && H2.war.on && p.fac !== q.fac; }
+// idle people keep a little personal space: step away from a neighbour when there is room
+function spaceOut(p) {
+  if ((pixelTicks + p.id) % 25 !== 0 || p.sleeping) return false;
+  const L = at(p.x - 1, p.y), R = at(p.x + 1, p.y);
+  const pl = L && isPerson(L) && !L.dead, pr = R && isPerson(R) && !R.dead;
+  if (pl === pr) return false;
+  const d = pl ? 1 : -1;
+  return dropOk(p.x + d, p.y) && shift(p, d, 0);
+}
+H2.spaceOut = spaceOut;
 function shift(p, dx, dy, soft) {    // move the whole person (body + head) by dx,dy; returns success. soft: trample grass blades
   const ch = isChildPx(p);
   const h = ch ? null : headOf(p);
@@ -368,20 +482,31 @@ function shift(p, dx, dy, soft) {    // move the whole person (body + head) by d
   const hx = bx, hy = by - 1;
   const ox = p.x, oy = p.y;
   const own = (x, y) => (x === ox && y === oy) || (!ch && x === ox && y === oy - 1);
-  // two friendly people meeting in a corridor swap places instead of blocking each other
-  if (dy === 0 && !ch) {
+  // people never block friends: they slip past each other (swap places), but never take the exact spot
+  // somebody is standing at to work - and nobody is ever pushed out of bed
+  if (dx !== 0 && Math.abs(dy) <= 1 && !ch) {
     const ob = inb(bx, by) ? pixelMap[bx][by] : null;
-    if (ob && ob.element === "hz_body" && !ob.sleeping && (ob.dead || ob.fac === p.fac || ob.fac === undefined) && !(ob.wantDir === dx && pixelTicks - (ob.wantT || -99) < 14)) {
-      const oh = at(bx, by - 1);
-      if (oh && oh.element === "hz_head") { swapPixels(p, ob); swapPixels(h, oh); return true; }
+    if (ob && (ob.element === "hz_body" || ob.element === "hz_child") && canSlipPast(p, ob)) {
+      if (ob.element === "hz_body") {
+        const oh = at(bx, by - 1);
+        if (oh && oh.element === "hz_head") { swapPixels(p, ob); swapPixels(h, oh); return true; }
+      } else {
+        // a child: step over them and let them take our place
+        SHIFT_DY = dy; const okH = own(hx, hy) || canEnter(hx, hy, p, soft); SHIFT_DY = 0;
+        if (okH) { SHIFT_DY = dy; openDoorsFor(p, hx, hy); SHIFT_DY = 0; if (!pixelMap[hx][hy] || own(hx, hy)) { swapPixels(p, ob); put(h, hx, hy); return true; } }
+      }
     }
   }
   // check first, then open doors: never open a door we cannot pass anyway
   const pass = (x, y) => { if (own(x, y)) return true; if (canEnter(x, y, p, soft)) return true; return false; };
-  if (!pass(bx, by)) return false;
-  if (!ch && !pass(hx, hy)) return false;
+  SHIFT_DY = dy;
+  const okB = pass(bx, by), okH = okB && (ch || pass(hx, hy));
+  SHIFT_DY = 0;
+  if (!okB || !okH) return false;
+  SHIFT_DY = dy;
   if (!ch) openDoorsFor(p, hx, hy);
   openDoorsFor(p, bx, by);
+  SHIFT_DY = 0;
   if (ch) { put(p, bx, by); return true; }
   if (dy > 0) { put(p, bx, by); put(h, hx, hy); }
   else { put(h, hx, hy); put(p, bx, by); }
@@ -437,10 +562,28 @@ function clearObstacle(p, dir) {
   }
   return did;
 }
+// two-storey houses: walk to the foot of the stairs first when the target is upstairs, and back to the stairs to come down.
+// Stair blocks and upper-floor planks carry sx (x of the stair foot) and uf (body y on the upper floor).
+function stairRoute(p, tx, ty) {
+  const below = at(p.x, p.y + 1);
+  const tb = at(tx, ty + 1);
+  const tUp = tb && tb.sx !== undefined && tb.uf !== undefined && Math.abs(ty - tb.uf) <= 1 ? tb : null;
+  if (below && below.sx !== undefined && below.uf !== undefined && !isPerson(below)) {
+    if (tUp && tUp.sx === below.sx) return null;                       // the target is on this floor
+    return { x: below.sx, down: true };                                // head back down the stairs first
+  }
+  if (tUp && p.y > ty + 1 && p.x !== tUp.sx) return { x: tUp.sx };      // go to the foot of the stairs
+  return null;
+}
+H2.stairRoute = stairRoute;
 function goTo(p, tx, ty, range, vy) {
   range = range === undefined ? 1 : range; vy = vy === undefined ? 3 : vy;
+  if (Math.abs(tx - p.x) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
+  p.tgx = tx; p.tgyy = ty;
+  const via = stairRoute(p, tx, ty);
+  p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
+  if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
-  if (Math.abs(dxT) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
   let dir = Math.sign(dxT);
   if (p.detour > 0) { dir = p.dd; p.detour--; }
   else if (dir === 0) dir = p.dir || 1;
@@ -502,7 +645,7 @@ function die(p, cause, killer, gone) {
   let msg;
   if (killer && killer.id) {
     killer.kills = (killer.kills || 0) + 1;
-    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
+    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
     if (killer.kills === 8) { killer.title = "Legendary"; chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
     msg = who + " was slain by " + nm(killer) + ".";
     H2.stats.battles++;
@@ -563,7 +706,7 @@ function physics(p) {
   if (!inb(x, y + 1)) { p.fl = 0; return; }
   const below = pixelMap[x][y + 1];
   const kb = below ? kindOf(below) : 0;
-  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && false)) {
+  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
     if (shift(p, 0, 1)) { if (kb === 0) p.fl = (p.fl || 0) + 1; return; }
   }
   if (kb >= 2) {
@@ -760,12 +903,13 @@ function actTick(p) {
 function homeTarget(p) { const c = colById(p.col); return c ? { x: c.x, y: c.y } : { x: p.x, y: p.y }; }
 TASKS.wander = function (p, t) {
   if (!p.wt || p.wt <= 0) {
-    if (rnd() < 0.45) { p.wt = rint(3, 10); p.wd = 0; return; }
+    if (rnd() < 0.45) { p.wt = rint(3, 10); p.wd = 0; spaceOut(p); return; }
     const hm = homeTarget(p);
     p.wd = (Math.abs(p.x - hm.x) > 45 && rnd() < 0.8) ? Math.sign(hm.x - p.x) : (rnd() < 0.5 ? -1 : 1);
     p.wt = rint(6, 28);
   }
   p.wt--;
+  if (!p.wd) spaceOut(p);
   if (p.wd && !tryWalk(p, p.wd, false)) { p.wd = -p.wd; if (rnd() < 0.3) p.wt = 0; }
   if (p.wt <= 0 && p.task && p.task.k === "wander") p.task = null;
 };
@@ -783,7 +927,7 @@ TASKS.flee = function (p, t) {
   if (!tryWalk(p, d, true)) { if (!tryWalk(p, -d, true)) shift(p, 0, -1); }
   if (rnd() < 0.15) t.from = p.x + (rnd() < 0.5 ? -6 : 6);
 };
-TASKS.rest = function (p, t) { if (pixelTicks > t.until) return "done"; };
+TASKS.rest = function (p, t) { if (pixelTicks > t.until) return "done"; spaceOut(p); };
 TASKS.warm = function (p, t) {
   if (pixelTicks > t.until || p.bt > 36.8) return "done";
   const s = H2.nearestOf((H2.st.campfire || []).concat(H2.st.hearth || [], H2.st.forgefire || []), p.x, p.y, 70);
@@ -864,7 +1008,7 @@ TASKS.socialize = function (p, t) {
   const s = H2.nearestOf((H2.st.campfire || []).concat(H2.st.market || [], H2.st.hall || []), p.x, p.y, 80);
   if (!s) return TASKS.wander(p, t);
   const r = goTo(p, s.x, accY(s), 3, 4);
-  if (r === "arrive" && H2.chat) H2.chat(p);
+  if (r === "arrive") { if (!spaceOut(p) && H2.chat) H2.chat(p); }
 };
 
 /* ======================================================================
@@ -1022,15 +1166,18 @@ function census(full) {
   if (maxId >= H2.idSeq) H2.idSeq = maxId + 1;
   if (maxCol >= H2.colSeq) H2.colSeq = maxCol + 1;
   // colonies: recompute headcounts
+  const fp = [];
   for (const c of H2.cols) { c.pop = 0; c.kids = 0; c.adults = 0; c.sold = 0; c.jobs = {}; c.sick = 0; c.hungry = 0; c.moodSum = 0; }
   for (let i = 0; i < ppl.length; i++) {
     let c = colById(ppl[i].col);
     if (!c) { c = colonyFor(ppl[i].fac, ppl[i].x, ppl[i].y); ppl[i].col = c.id; }
     if (c.fac !== ppl[i].fac) { /* defector */ }
-    c.pop++;
+    c.pop++; fp[c.fac] = (fp[c.fac] || 0) + 1;
+    if (!c.founder) c.founder = ppl[i].first + " " + ppl[i].sn;
     if (isChildPx(ppl[i])) c.kids++; else { c.adults++; c.jobs[ppl[i].job] = (c.jobs[ppl[i].job] || 0) + 1; if (ppl[i].job === "soldier" || ppl[i].job === "sentry" || ppl[i].job === "scout") c.sold++; }
     if (ppl[i].sick) c.sick++; if (ppl[i].hu < 25) c.hungry++; c.moodSum += ppl[i].mo;
   }
+  H2.facPop = fp;
   if (full) {
     const st = {};
     for (let i = 0; i < cp.length; i++) {
@@ -1041,22 +1188,25 @@ function census(full) {
     H2.st = st;
     for (const c of H2.cols) {
       c.beds = 0;
-      const halls = (st.hall || []).filter((s) => s.fac === c.fac && Math.abs(s.x - c.x) < 90);
+      const halls = (st.hall || []).filter((s) => s.fac === c.fac && Math.abs(s.x - c.x) < 90 && ownedBy(s, c));
       const hall = H2.nearestOf(halls, c.x, c.y, 200);
       c.hall = hall ? { x: hall.x, y: hall.ay !== undefined ? hall.ay : hall.y } : null;
       if (hall) { c.x = hall.x; c.y = hall.ay !== undefined ? hall.ay : hall.y; }
-      else if (c.pop > 0) { let sx = 0, n = 0, sy = 0; for (const p of ppl) if (p.col === c.id) { sx += p.x; sy += p.y; n++; } if (n) { c.x = Math.round(c.x * 0.9 + (sx / n) * 0.1); c.y = Math.round(c.y * 0.9 + (sy / n) * 0.1); } }
-      for (const b of (st.bed || [])) if (b.fac === c.fac && Math.abs(b.x - c.x) < 100) c.beds++;
+      else if (c.pop > 0 && !c.site) { let sx = 0, n = 0, sy = 0; for (const p of ppl) if (p.col === c.id) { sx += p.x; sy += p.y; n++; } if (n) { c.x = Math.round(c.x * 0.9 + (sx / n) * 0.1); c.y = Math.round(c.y * 0.9 + (sy / n) * 0.1); } }
+      for (const b of (st.bed || [])) if (b.fac === c.fac && Math.abs(b.x - c.x) < 100 && ownedBy(b, c)) c.beds++;
     }
   }
 }
 H2.census = census;
+// buildings belong to the settlement that built them (cid); orphaned ones are claimed by whoever is nearest
+function ownedBy(s, c) { if (s.cid === undefined || s.cid === c.id) return true; const o = colById(s.cid); return !o || (o.pop <= 0 && o.fac === c.fac); }
+H2.ownedBy = ownedBy;
 // access point of a station (the ground cell next to it)
 const accY = (s) => (s.ay !== undefined ? s.ay : s.y);
 H2.accY = accY;
 function stationsOf(type, c, maxD) {
   const l = H2.st[type]; if (!l) return [];
-  return l.filter((s) => !s.del && (s.fac === undefined || s.fac === c.fac) && Math.abs(s.x - c.x) < (maxD || 110));
+  return l.filter((s) => !s.del && (s.fac === undefined || s.fac === c.fac) && Math.abs(s.x - c.x) < (maxD || 110) && ownedBy(s, c));
 }
 H2.stationsOf = stationsOf;
 
@@ -1099,7 +1249,7 @@ function wantedJobs(c) {
   W.farmer = Math.max(1, Math.round(a * 0.3));
   W.woodcutter = Math.max(1, Math.round(a * 0.17));
   W.miner = Math.max(1, Math.round(a * 0.12));
-  W.builder = Math.max(1, Math.round(a * (c.plans.length ? 0.25 : 0.12)));
+  W.builder = Math.max(c.plans.length && a >= 4 ? 2 : 1, Math.round(a * (c.plans.length ? (c.beds < c.pop || !c.hall ? 0.32 : 0.25) : 0.12)));
   const hasOven = stationsOf("oven", c).length > 0, hasForge = stationsOf("forge", c).length > 0, hasHosp = stationsOf("hospital", c).length > 0 || a >= 8;
   W.baker = hasOven ? 1 : 0; W.smith = hasForge ? (a >= 14 ? 2 : 1) : 0; W.doctor = hasHosp && a >= 6 ? 1 : 0;
   W.merchant = stationsOf("market", c).length && a >= 9 ? 1 : 0;
@@ -1160,6 +1310,7 @@ function colonyThink(c) {
   if (H2.cfg.birth) pregnancyAndBirths(c);
   assignJobs(c);
   if (H2.planBuild) H2.planBuild(c);
+  if (H2.cfg.expand) tryExpand(c);
   if (H2.warThinkColony && H2.cfg.war) H2.warThinkColony(c);
   burials(c);
 }
@@ -1176,6 +1327,75 @@ function burials(c) {
   for (const r of c.corpses) { const b = H2.byId[r.id]; r.x = b.x; r.y = b.y; }
 }
 H2.pendingBurial = function (c) { return c.corpses.length ? c.corpses[0] : null; };
+
+/* ---- expansion: crowded towns send settlers to found new villages ------------ */
+function facPopOf(f) { return (H2.facPop && H2.facPop[f]) || 0; }
+function frontierSite(c) {
+  let best = null, bs = 1e9;
+  const W = 13;
+  for (let x = W + 2; x < width - W - 2; x += 3) {
+    let near = false;
+    for (const o of H2.cols) { const d = Math.abs(x - o.x); if (d < (o.fac === c.fac ? 64 : 95)) { near = true; break; } }
+    if (near) continue;
+    let ok = true, mn = 1e9, mx = -1e9;
+    for (let i = -W; i <= W; i += 2) {
+      const g = columnGround(x + i); if (g < 6) { ok = false; break; }
+      const t = at(x + i, g + 1); if (!t || elements[t.element].state === "liquid") { ok = false; break; }
+      mn = Math.min(mn, g); mx = Math.max(mx, g);
+    }
+    if (!ok || mx - mn > 8) continue;
+    let sc = Math.abs(x - c.x) + (mx - mn) * 4;
+    for (const o of H2.cols) if (o.fac !== c.fac) sc -= Math.min(60, Math.abs(x - o.x)) * 0.5;   // prefer away from rivals
+    if (sc < bs) { bs = sc; best = { x: x, y: Math.round((mn + mx) / 2) }; }
+  }
+  return best;
+}
+function tryExpand(c) {
+  if (c.site && !c.hall) return;                                   // still being founded itself
+  if (facPopOf(c.fac) >= H2.cfg.maxPerFaction - 6 || H2.people.length >= H2.cfg.maxPeople - 6) return;
+  if (c.war.state !== "peace" && c.war.state !== "wary") return;
+  if (c.adults < 10 || c.famine || c.riot) return;
+  const cap = H2.cfg.townSize || 60;
+  if (!((c.crowded || 0) >= 3 || c.pop >= cap)) return;
+  if (pixelTicks - (c.lastExp || c.founded || 0) < DAY * 3) return;
+  const s = c.stock; if (s.wood < 45 || s.bread + s.grain * 0.5 < 25) return;
+  const site = frontierSite(c);
+  c.lastExp = pixelTicks;
+  if (!site) { if (!c.noRoom) { c.noRoom = true; chronicle(c.name + " is crowded, but there is no free land left to settle.", false, c.fac); } return; }
+  // pick settlers: whole families of ordinary workers
+  const mine = H2.people.filter((p) => p.col === c.id && !p.dead && !p.nomad);
+  const pool = mine.filter((p) => !isChildPx(p) && stageOf(p) === "adult" && !["soldier", "scout", "sentry", "guard", "doctor", "merchant", "smith"].includes(p.job));
+  const want = clamp(Math.round(c.adults * 0.25), 4, 9);
+  const chosen = new Set();
+  pool.sort(() => rnd() - 0.5);
+  for (const p of pool) {
+    if (chosen.size >= want) break;
+    chosen.add(p);
+    if (p.sp) { const sp = H2.byId[p.sp]; if (sp && !sp.dead && sp.col === c.id && !isChildPx(sp)) chosen.add(sp); }
+  }
+  if (chosen.size < 4) return;
+  for (const p of Array.from(chosen)) for (const kid of (p.kids || [])) { const k = H2.byId[kid]; if (k && !k.dead && isChildPx(k) && k.col === c.id) chosen.add(k); }
+  const nc = newColony(c.fac, site.x, site.y);
+  nc.site = { x: site.x, y: site.y }; nc.parent = c.id; nc.mat = null;
+  const give = { wood: 35, stone: 12, iron: 2, grain: 8, bread: 18, coin: 30 };
+  for (const g in give) { const n = Math.min(give[g], Math.floor((s[g] || 0) * 0.4)); s[g] -= n; nc.stock[g] = n; }
+  for (const p of chosen) {
+    p.col = nc.id; p.task = null; p.home = null;
+    for (const b of (H2.st.bed || [])) if (b.owner === p.id) { b.owner = 0; b.ownerName = ""; }
+    if (!isChildPx(p) && p.job !== "laborer") setJob(p, "laborer");
+    setTask(p, "migrate", { x: site.x, y: site.y }, 70);
+    addThought(p, "pioneer", 10, DAY);
+  }
+  chronicle(chosen.size + " settlers leave " + c.name + " to found " + nc.name + ".", true, c.fac);
+  census(true);
+}
+TASKS.migrate = function (p, t) {
+  const r = goTo(p, t.x, t.y, 4, 12);
+  if (r === "arrive") return "done";
+  if (r === "fail") { t.f = (t.f || 0) + 1; if (t.f > 6) return "done"; }
+  if (pixelTicks - t.t0 > DAY * 1.5) return "done";
+};
+H2.tryExpand = tryExpand; H2.frontierSite = frontierSite;
 
 /* ======================================================================
    JOBS & WORK TASKS
@@ -1268,11 +1488,16 @@ function treeBase(o) { // walk down to the lowest wood pixel; returns it if the 
 }
 TASKS.chop = function (p, t) {
   if ((p.inv.wood || 0) >= CARRY_MAX) return "done";
+  const c = colById(p.col);
   if (!t.base || t.base.del || !isTreePart(t.base)) {
-    const tp = (q) => { if (!isTreePart(q)) return false; const b = treeBase(q); return !!b && !isBad(p, b.x, b.y); };
+    const tp = (q) => { if (!isTreePart(q)) return false; const b = treeBase(q); return !!b && !isBad(p, b.x, b.y) && !(c && Math.abs(b.x - c.x) < 8 && c.hall); };
     const o = H2.findNear(p.x, p.y, 38, tp) || H2.findNear(p.x, p.y, 90, tp, 2);
     t.base = o ? treeBase(o) : null; t.n = 0;
-    if (!t.base) { t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noTrees = pixelTicks; return "fail"; } return TASKS.wander(p, t); }
+    if (!t.base) {
+      // no trees left nearby: plant a grove instead (woodcutters keep the forest alive)
+      if (c && !t.planted) { const pri = t.pri || 10; p.task = null; setTask(p, "plant_trees", { work: true, n: 0 }, pri); return; }
+      t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noTrees = pixelTicks; return "fail"; } return TASKS.wander(p, t);
+    }
   }
   const r = goTo(p, t.base.x, t.base.y, 1, 3);
   if (r === "fail") { markBad(p, t.base.x, t.base.y, 3000); t.base = null; return; }
@@ -1292,7 +1517,7 @@ function fellTree(p, base) {
       if (!dx && !dy) continue;
       const n = at(o.x + dx, o.y + dy); if (!n || n.del) continue;
       const key = n.x + "," + n.y; if (seen[key]) continue;
-      if (n.element === "wood" || n.element === "tree_branch" || (n.element === "plant" && (o.element !== "plant" || cnt < 100))) { seen[key] = true; q.push(n); }
+      if (n.element === "wood" || n.element === "tree_branch" || (n.element === "plant" && (o.element !== "plant" || cnt < 100))) { if (n.hzb2 || elements[n.element].hzb) continue; seen[key] = true; q.push(n); }
     }
   }
   const bx = base.x, by = base.y;
@@ -1300,45 +1525,147 @@ function fellTree(p, base) {
   const yield_ = clamp(Math.ceil(wood / 2) + 1, 2, 9);
   p.inv.wood = (p.inv.wood || 0) + yield_;
   p.sk.wood++;
-  // replant only now and then, and never right inside the village (saplings grow into huge trees in Sandboxels)
+  // replant a managed sapling (never right inside the village)
   const pc = colById(p.col);
-  if (inb(bx, by) && !pixelMap[bx][by] && elements.sapling && pc && Math.abs(bx - pc.x) > 28 && rnd() < 0.2 && (H2.cfg.replant !== false)) createPixel("sapling", bx, by);
+  if (H2.cfg.replant !== false && pc && Math.abs(bx - pc.x) > 16 && inb(bx, by) && !pixelMap[bx][by] && rnd() < 0.7) { createPixel("hz_sapling", bx, by); }
 }
-
-/* ---- mining -------------------------------------------------------------- */
-TASKS.mine = function (p, t) {
-  if (carrying(p) >= CARRY_MAX) return "done";
-  const c = colById(p.col);
-  if (!t.rock || t.rock.del || (t.rock.element !== "rock" && t.rock.element !== "gravel")) {
-    const o = H2.findNear(p.x, p.y, 30, (q) => (q.element === "rock") && !isBad(p, q.x, q.y) && (!isFree(q.x - 1, q.y) ? !isFree(q.x + 1, q.y) ? !isFree(q.x, q.y - 1) ? false : true : true : true));
-    t.rock = o; t.n = 0;
-    if (!t.rock) { t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); }
+// grove management: plant saplings on free soil outside the village
+function groveSpot(p, c) {
+  const side0 = c.groveSide || (c.groveSide = (c.x < width / 2 ? -1 : 1) * (rnd() < 0.7 ? 1 : -1));
+  for (let tries = 0; tries < 16; tries++) {
+    const side = tries < 10 ? side0 : -side0;
+    const x = clamp(Math.round(c.x + side * rint(20, 48)), 2, width - 3);
+    if (isBad(p, x, 0)) continue;
+    const gy = groundY(x, clamp(c.y - 14, 0, height - 2), 30);
+    if (gy < 8) continue;
+    const b = at(x, gy + 1); if (!b || !TREE_SOIL[b.element]) continue;
+    let ok = true;
+    for (let dx = -3; dx <= 3 && ok; dx++) for (let dy = -8; dy <= 0; dy++) { const o = at(x + dx, gy + dy); if (o && (elements[o.element].hzb || isTreePart(o) || o.element === "hz_sapling" || o.element === "hz_crop")) { ok = false; break; } }
+    if (!ok || (H2.reserved && H2.reserved(c, x, gy))) continue;
+    if (c.quarry && Math.abs(x - c.quarry.x0) < 18) continue;
+    return { x: x, y: gy };
   }
-  // stand beside the rock on its open side
-  const side = isFree(t.rock.x - 1, t.rock.y) ? -1 : isFree(t.rock.x + 1, t.rock.y) ? 1 : 0;
-  const tx = side ? t.rock.x + side : t.rock.x, ty = t.rock.y;
-  const r = goTo(p, tx, ty, 0, 1);
-  if (r === "fail") { markBad(p, t.rock.x, t.rock.y, 3000); t.rock = null; return; }
+  return null;
+}
+TASKS.plant_trees = function (p, t) {
+  const c = colById(p.col); if (!c) return "done";
+  if (!t.spot) { t.spot = groveSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 5) return "done"; return TASKS.wander(p, t); } }
+  const r = goTo(p, t.spot.x, t.spot.y, 1, 3);
+  if (r === "fail") { markBad(p, t.spot.x, 0, 4000); t.spot = null; return; }
   if (r === "arrive") {
-    t.n++;
-    if (t.n >= 9 - Math.min(4, Math.floor(p.sk.mine / 8))) {
-      const rx = t.rock.x, ry = t.rock.y;
-      deletePixel(rx, ry);
-      p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
-      const deep = clamp((ry - (c ? c.y : ry)) / 10, 0, 1);
-      if (rnd() < 0.07 + deep * 0.1) { p.inv.iron = (p.inv.iron || 0) + 1; }
-      if (rnd() < 0.025) { p.inv.powder = (p.inv.powder || 0) + 1; }
-      t.rock = null;
-    }
+    if (!pixelMap[t.spot.x][t.spot.y]) createPixel("hz_sapling", t.spot.x, t.spot.y);
+    t.spot = null; t.n = (t.n || 0) + 1; p.sk.wood += 0.2;
+    if (t.n >= 3) return "done";
   }
 };
+
+/* ---- mining -------------------------------------------------------------- */
+// stone-like ground that yields stone; everything else dug in a quarry is just spoil
+const STONY = { rock: 1, gravel: 1, basalt: 1, granite: 1, limestone: 1, slate: 1, marble: 1, sandstone: 1, tuff: 1, quartz: 1, rock_wall: 1, packed_sand: 0, iron_ore: 1, ore: 1, raw_iron: 1, cobblestone: 1 };
+const isStony = (o) => !!o && STONY[o.element] === 1 && !o.hzb2;
+const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant" || o.element === "hz_crop" || o.element === "hz_sapling");
+function mineYield(p, o, c) {
+  if (!isStony(o)) return;
+  p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
+  const deep = clamp((o.y - (c ? c.y : o.y)) / 10, 0, 1);
+  if (rnd() < 0.08 + deep * 0.12 || o.element === "iron_ore" || o.element === "raw_iron") p.inv.iron = (p.inv.iron || 0) + 1;
+  if (rnd() < 0.03 + deep * 0.02) p.inv.powder = (p.inv.powder || 0) + 1;   // saltpetre & sulphur veins
+}
+function exposedRock(p, c) {
+  return H2.findNear(p.x, p.y, 30, (q) => isStony(q) && !isBad(p, q.x, q.y) && (isFree(q.x - 1, q.y) && isFree(q.x - 1, q.y - 1) || isFree(q.x + 1, q.y) && isFree(q.x + 1, q.y - 1)) && !(c && Math.abs(q.x - c.x) < 10 && c.hall) && !builtAbove(q.x, q.y));
+}
+// a stepped open-cast quarry outside the village: each column is dug one cell deeper than the last, so it is always walkable
+function planQuarry(c) {
+  const order = [];
+  for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // always outside the built-up town
+    for (let d = Math.max(16, e); d <= Math.max(54, e + 28); d += 4) order.push(c.x + side * d);
+  }
+  // prefer a long, deep cut; on cramped land settle for a smaller pit
+  for (const L of [20, 13, 8]) for (const x0 of order) {
+    const dir = Math.sign(x0 - c.x) || 1;
+    if (x0 < 3 || x0 > width - 4 || x0 + dir * (L + 2) < 3 || x0 + dir * (L + 2) > width - 4) continue;
+    if (!ownTerritory(c, x0) || !ownTerritory(c, x0 + dir * L)) continue;
+    const g0 = columnGround(x0); if (g0 < 4) continue;
+    let ok = true;
+    for (let j = -1; j <= L + 2 && ok; j++) {
+      const x = x0 + dir * j;
+      for (let y = 0; y < height; y++) { const o = pixelMap[x][y]; if (!o) continue; if (elements[o.element].hzb || elements[o.element].fdn || isTreePart(o) || elements[o.element].state === "liquid") ok = false; if (!isPerson(o) && !isSoft(o) && kindOf(o) === 2 && o.element !== "hz_crop" && o.element !== "hz_sapling") break; }
+      if (ok && H2.reserved(c, x, g0)) ok = false;
+    }
+    if (!ok) continue;
+    const cells = [];
+    for (let j = 0; j <= L; j++) {
+      const x = x0 + dir * j, bottom = Math.min(height - 3, g0 + 1 + Math.min(j, 12));
+      const top = columnGround(x) + 1; if (top < 1) continue;
+      for (let y = top; y <= bottom; y++) cells.push([x, y]);
+    }
+    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0 };
+    return c.quarry;
+  }
+  return null;
+}
+TASKS.mine = function (p, t) {
+  if (carrying(p) >= CARRY_MAX) return "done";
+  const c = colById(p.col); if (!c) return "done";
+  // 1. loose rock lying open at the surface
+  if (!t.q && (!t.rock || t.rock.del || !isStony(t.rock))) {
+    t.rock = exposedRock(p, c); t.n = 0;
+    if (!t.rock) t.q = true;
+  }
+  if (!t.q) {
+    const side = isFree(t.rock.x - 1, t.rock.y) ? -1 : isFree(t.rock.x + 1, t.rock.y) ? 1 : 0;
+    const tx = side ? t.rock.x + side : t.rock.x, ty = t.rock.y;
+    const r = goTo(p, tx, ty, 0, 2);
+    if (r === "fail") { markBad(p, t.rock.x, t.rock.y, 3000); t.rock = null; return; }
+    if (r === "arrive") {
+      t.n++;
+      if (t.n >= 9 - Math.min(4, Math.floor(p.sk.mine / 8))) { const o = t.rock; deletePixel(o.x, o.y); mineYield(p, o, c); t.rock = null; t.q = false; }
+    }
+    return;
+  }
+  // 2. the quarry
+  let Q = c.quarry;
+  if (!Q || Q.i >= Q.cells.length) { Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
+  let cell = Q.cells[Q.i];
+  // skip cells that are already empty or must not be dug (water next to it would flood the pit)
+  let guard = 0;
+  while (cell && guard++ < 40) {
+    const o = at(cell[0], cell[1]);
+    const wet = [[1, 0], [-1, 0], [0, -1]].some((d) => { const n = at(cell[0] + d[0], cell[1] + d[1]); return n && elements[n.element] && elements[n.element].state === "liquid"; });
+    if (wet) { Q.i = Q.cells.length; return "done"; }
+    if (o && DIGGABLE(o)) break;
+    if (o && !isPerson(o) && !DIGGABLE(o) && !o.del) { Q.i = Q.cells.length; return "done"; }   // something built there meanwhile
+    if (o && isPerson(o)) return;                                                                 // wait
+    if (o && builtAbove(cell[0], cell[1])) { Q.i++; cell = Q.cells[Q.i]; continue; }             // never undermine a building
+    Q.i++; cell = Q.cells[Q.i];
+  }
+  if (!cell) return "done";
+  const r = goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
+  if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }
+  if (r !== "arrive") return;
+  t.n = (t.n || 0) + 1;
+  const o = at(cell[0], cell[1]); if (!o) { Q.i++; return; }
+  if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) {
+    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++;
+    // remember the open pit so nobody builds on its edge
+    const pits = c.pits || (c.pits = []); const last = Q.pit;
+    if (last) { last[0] = Math.min(last[0], o.x); last[1] = Math.max(last[1], o.x); } else { Q.pit = [o.x, o.x]; pits.push(Q.pit); }
+  }
+};
+function builtAbove(x, y) {
+  for (let xx = x - 1; xx <= x + 1; xx++) for (let yy = y - 1; yy >= Math.max(0, y - 14); yy--) { const o = at(xx, yy); if (o && !isPerson(o) && (elements[o.element].hzb || elements[o.element].fdn)) return true; }
+  return false;
+}
 function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 
 /* ---- farming -------------------------------------------------------------- */
 const SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, farmland: 1 };
 function farmSpot(p, c) {
   for (let tries = 0; tries < 12; tries++) {
-    const x = clamp(c.x + rint(-32, 32), 2, width - 3);
+    // fields lie around the town, not in it: between the edge of the built-up area and 30 cells beyond
+    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3 : 9;
+    const x = clamp(c.x + side * rint(e, e + 30), 2, width - 3);
     const gy = groundY(x, clamp(c.y - 10, 0, height - 2), 24);
     if (gy < 1) continue;
     const b = at(x, gy + 1); if (!b || !SOIL[b.element]) continue;
@@ -1630,7 +1957,7 @@ TASKS.pickpocket = function (p, t) {
 
 /* ---- beds ------------------------------------------------------------------ */
 H2.claimBed = function (p, c) {
-  const beds = (H2.st.bed || []).filter((b) => !b.del && b.fac === p.fac && Math.abs(b.x - c.x) < 110 && (!b.owner || !H2.byId[b.owner] || H2.byId[b.owner].dead));
+  const beds = (H2.st.bed || []).filter((b) => !b.del && b.fac === p.fac && Math.abs(b.x - c.x) < 110 && ownedBy(b, c) && (!b.owner || !H2.byId[b.owner] || H2.byId[b.owner].dead));
   if (!beds.length) return null;
   let anchor = null;
   if (p.sp) { const s = H2.byId[p.sp]; if (s && s.home) anchor = s.home; }
@@ -1698,7 +2025,12 @@ const COST = {
   hz_banner: { wood: 1 }, hz_anvil: { iron: 3 }, hz_forgefire: { stone: 2 }, hz_oven: { stone: 3 }, hz_rack: { wood: 2, iron: 1 }, hz_dummy: { wood: 2 },
   hz_post: { wood: 1 }, hz_medcross: { wood: 1 }, hz_scarecrow: { wood: 1 }, hz_mill: { wood: 3 }, hz_chest: { wood: 2 }, hz_cannon: { cannon: 1 }, hz_well: {},
   glass: {}, dirt: {}, water: {}, hz_earth: {},
+  hz_plaster: { stone: 0.25 }, hz_beam: { wood: 0.5 }, hz_window: {}, hz_shutter: { wood: 0.25 }, hz_flowerbox: { wood: 0.25 }, hz_chimney: { stone: 1 },
+  hz_lantern: { wood: 0.25 }, hz_gold: { iron: 0.25 }, hz_statue: { stone: 1 }, hz_spray: {}, hz_stair: { wood: 1 }, hz_lamppost: { wood: 0.5 },
+  hz_flower: {}, hz_plinth: { stone: 0.5 }, hz_interior: {}, hz_backwin: {},
 };
+const QUICK = { hz_interior: 1, hz_backwin: 1, hz_flower: 1, hz_spray: 1 };   // cheap finishing touches go up fast
+COST.hz_roof = { wood: 0.2 }; COST.hz_beam = { wood: 0.25 }; COST.hz_plank = { wood: 0.5 }; COST.hz_door = { wood: 0.5 }; COST.hz_stair = { wood: 0.5 }; COST.hz_plaster = { stone: 0.15 };
 const GROUNDISH = { hz_earth: 1, dirt: 1, grass: 1, soil: 1, mud: 1, sand: 1, rock: 1, gravel: 1, clay: 1, clay_soil: 1, snow: 1, packed_snow: 1, permafrost: 1, sandstone: 1, limestone: 1, basalt: 1, granite: 1, packed_sand: 1, farmland: 1 };
 function groundish(o) { if (!o || isPerson(o)) return false; const e = elements[o.element]; return !!(GROUNDISH[o.element] || (e && e.category === "land" && !e.hzb && e.state !== "liquid" && o.element !== "wood" && o.element !== "plant")); }
 
@@ -1739,13 +2071,14 @@ const BUILD_NAMES = { hut: "a hut", house: "a house", hall: "the town hall", wel
 const MAJOR_BUILD = { hall: 1, well: 1, market: 1, forge: 1, bakery: 1, hospital: 1, barracks: 1, tower: 1, wall: 1, moat: 1, palisade: 1, cannon: 1 };
 
 function costOfPlan(bp) { const c = {}; for (const cell of bp.cells) { const k = COST[cell[2]]; if (!k) continue; for (const g in k) c[g] = (c[g] || 0) + k[g]; } return c; }
+H2.costOfPlan = costOfPlan;
 function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) return false; return true; }
 
 /* ---- site finding ---------------------------------------------------------- */
 function columnGround(x) { // y of free cell above the topmost solid thing, only if that is real ground
   if (x < 1 || x >= width - 1) return -1;
   for (let y = 0; y < height - 1; y++) {
-    const o = pixelMap[x][y]; if (!o || isPerson(o)) continue;
+    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop") continue;   // decor and crops make way for buildings
     if (isSoft(o) && (o.element !== "grass" || o.h > 0 || isSoft(pixelMap[x][y + 1]))) continue;  // grass blades / flowers are not ground
     if (elements[o.element] && elements[o.element].state === "gas") continue;
     return groundish(o) ? y - 1 : -1;
@@ -1753,6 +2086,9 @@ function columnGround(x) { // y of free cell above the topmost solid thing, only
   return -1;
 }
 function overlaps(c, x0, x1, margin) { for (const pl of c.plans) if (x1 + margin >= pl.x0 && x0 - margin <= pl.x1) return true; return false; }
+// a settlement only builds on ground that is closer to it than to any other settlement
+function ownTerritory(c, x) { const d = Math.abs(x - c.x); for (const o of H2.cols) if (o !== c && o.pop > 0 && Math.abs(x - o.x) < d) return false; return true; }
+H2.ownTerritory = ownTerritory;
 H2.reserved = function (c, x, y) { for (const pl of c.plans) if (x >= pl.x0 - 2 && x <= pl.x1 + 2) return true; return false; };
 function findSite(c, w, opt) {
   opt = opt || {};
@@ -1763,48 +2099,55 @@ function findSite(c, w, opt) {
   for (let o = 2; o <= range; o += 2) { if (opt.side === 1) order.push(o, -o); else if (opt.side === -1) order.push(-o, o); else order.push(o, -o); }
   for (const off of order) {
     const x0 = Math.round(cx + off - w / 2);
-    if (x0 < lo || x0 + w - 1 > hi) continue;
-    if (overlaps(c, x0, x0 + w - 1, 1)) continue;
+    const why = H2.dbgSite;
+    if (x0 < lo || x0 + w - 1 > hi) { if (why) why.push(off + ":range"); continue; }
+    if (overlaps(c, x0, x0 + w - 1, 1)) { if (why) why.push(off + ":plan"); continue; }
+    if (onPit(x0 - 3, x0 + w + 2)) { if (why) why.push(off + ":pit"); continue; }
+    if (!opt.anywhere && !ownTerritory(c, x0 + w / 2)) { if (why) why.push(off + ":terr"); continue; }
     let ok = true, mn = 1e9, mx = -1e9; const gys = [];
     for (let i = 0; i < w; i++) { const g = columnGround(x0 + i); if (g < 2) { ok = false; break; } gys.push(g); if (g < mn) mn = g; if (g > mx) mx = g; }
-    if (!ok || mx - mn > (opt.slope || 3)) continue;
+    if (!ok || mx - mn > (opt.slope || 3)) { if (why) why.push(off + (ok ? ":slope" + (mx - mn) : ":ground")); continue; }
     if (!opt.nomargin) { // keep a gap to neighbouring buildings
       let bad = false;
-      for (const mxx of [x0 - 1, x0 - 2, x0 + w, x0 + w + 1]) { if (mxx < 1 || mxx >= width - 1) continue; for (let y = 0; y < height; y++) { const o = pixelMap[mxx][y]; if (o) { if (elements[o.element].hzb) bad = true; break; } } if (bad) break; }
-      if (bad) continue;
+      for (const mxx of [x0 - 1, x0 - 2, x0 + w, x0 + w + 1]) { if (mxx < 1 || mxx >= width - 1) continue; for (let y = 0; y < height; y++) { const o = pixelMap[mxx][y]; if (o && !o.dec) { if (elements[o.element].hzb) bad = true; break; } } if (bad) break; }
+      if (bad) { if (why) why.push(off + ":margin"); continue; }
     }
     return { x0: x0, y0: mn, gys: gys, ag: [columnGround(x0 - 1), columnGround(x0 + w)] };
   }
   return null;
 }
 H2.findSite = findSite;
+function onPit(a, b) { for (const k of H2.cols) for (const q of (k.pits || [])) if (b >= q[0] && a <= q[1]) return true; return false; }
 
 /* ---- plans ----------------------------------------------------------------- */
 function queuePlan(c, type, opt) {
   opt = opt || {};
-  const bp = BLUEPRINTS[type](); const cost = costOfPlan(bp);
+  const bp = BLUEPRINTS[type](c, opt); const cost = costOfPlan(bp);
   const site = opt.site || findSite(c, bp.w, opt);
   if (!site) return null;
   const cells = [];
   // foundation for uneven ground (packed earth, so it neither crumbles nor grows grass inside the house)
   if (site.gys && !bp.dug) {
     const floor = bp.w >= 3;
-    for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= Math.max(site.gys[i], floor ? site.y0 + 1 : site.y0); y++) cells.push([i, y - site.y0, "hz_earth"]);
+    for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= Math.max(site.gys[i], floor ? site.y0 + 1 : site.y0); y++) {
+      const dy = y - site.y0, col = dy === 1 ? (bp.floorC || bp.pathC) : bp.baseC;
+      cells.push([i, dy, "hz_earth", col ? { c: shade(col, dy === 1 ? 1 : (dy % 2 ? 0.96 : 1.04)) } : undefined]);
+    }
     // level the ground right outside both ends so people can walk straight in and out of the doors
     if (floor && site.ag && !opt.nomargin) {
       [[-1, site.ag[0]], [bp.w, site.ag[1]]].forEach(([ax, g]) => {
         if (g < 1 || g - site.y0 > 4 || site.y0 - g > 6) return;
         for (let y = g + 1; y <= site.y0; y++) cells.push([ax, y - site.y0, "__dig"]);
-        for (let y = site.y0 + 1; y <= Math.max(site.y0 + 1, g); y++) cells.push([ax, y - site.y0, "hz_earth"]);
+        for (let y = site.y0 + 1; y <= Math.max(site.y0 + 1, g); y++) cells.push([ax, y - site.y0, "hz_earth", bp.pathC ? { c: shade(bp.pathC) } : undefined]);
       });
       // clear the head room above the approach as well (plants, loose earth)
       for (const ax of [-1, bp.w]) for (let dy = -2; dy <= 0; dy++) cells.push([ax, dy, "__dig"]);
     }
   }
   for (const cell of bp.cells) cells.push(cell.slice());
-  if (opt.mirror) for (const cell of cells) { cell[0] = bp.w - 1 - cell[0]; }
+  if (opt.mirror) for (const cell of cells) { cell[0] = bp.w - 1 - cell[0]; if (cell[3] && cell[3].sx !== undefined) cell[3] = Object.assign({}, cell[3], { sx: bp.w - 1 - cell[3].sx }); }
   cells.sort((a, b) => (a[3] && a[3].late ? 1 : 0) - (b[3] && b[3].late ? 1 : 0) || (a[2] === "water" ? 1 : 0) - (b[2] === "water" ? 1 : 0) || (b[2] === "__dig" ? 1 : 0) - (a[2] === "__dig" ? 1 : 0) || b[1] - a[1] || a[0] - b[0]);
-  const plan = { id: c.plans.length + 1000 + Math.floor(rnd() * 1e6), type: type, x0: site.x0, y0: site.y0, x1: site.x0 + bp.w - 1, w: bp.w, cells: cells, i: 0, state: "ready", t0: pixelTicks, opt: opt, cost: cost, dir: opt.dir };
+  const plan = { id: c.plans.length + 1000 + Math.floor(rnd() * 1e6), type: type, x0: site.x0, y0: site.y0, x1: site.x0 + bp.w - 1, w: bp.w, cells: cells, i: 0, state: "ready", t0: pixelTicks, opt: opt, cost: cost, dir: opt.dir, beds: bp.beds || 0, style: bp.style };
   c.plans.push(plan);
   return plan;
 }
@@ -1825,17 +2168,15 @@ function planBuild(c) {
   }
   if (c.plans.length >= 2) return;
   const s = c.stock, pop = c.pop, adults = c.adults || 0;
-  const can = (type, frac) => affordable(c, costOfPlan(BLUEPRINTS[type]()), frac || 0.6);
+  const can = (type, frac) => affordable(c, costOfPlan(BLUEPRINTS[type](c)), frac || 0.6);
   const hasHall = !!c.hall;
   // housing first
-  const housing = c.beds + c.plans.filter((p) => p.type === "house" || p.type === "hut").reduce((n, p) => n + (p.type === "house" ? 2 : 1), 0);
+  const housing = c.beds + c.plans.reduce((n, p) => n + (p.beds || 0), 0);
+  const housePlanned = c.plans.some((p) => HOUSING[p.type]);
   if (!hasHall && pop >= 3 && can("hall", 0.55) && !c.plans.some((p) => p.type === "hall")) { if (queuePlan(c, "hall", { cx: c.x })) return; }
   if (haveCount(c, "campfire") === 0 && pop >= 2 && !c.plans.some((p) => p.type === "campfire") && s.wood >= 2) { if (queuePlan(c, "campfire", { cx: hasHall ? c.hall.x : c.x, range: 14 })) return; }
-  if (housing < pop + 1 && !c.plans.some((p) => p.type === "house" || p.type === "hut")) {
-    const t = (pop >= 4 && can("house", 0.6)) ? "house" : "hut";
-    if (can(t, 0.6)) { if (queuePlan(c, t)) return; }
-  }
   if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 })) return; }
+  if (housing < pop + 1 && !housePlanned) { if (planHouse(c, can)) return; }
   if (pop >= 5 && haveCount(c, "oven") === 0 && can("bakery", 0.7) && !c.plans.some((p) => p.type === "bakery")) { if (queuePlan(c, "bakery")) return; }
   if (pop >= 6 && haveCount(c, "market") === 0 && can("market", 0.7) && !c.plans.some((p) => p.type === "market")) { if (queuePlan(c, "market")) return; }
   if (pop >= 8 && haveCount(c, "forge") === 0 && can("forge", 0.7) && !c.plans.some((p) => p.type === "forge")) { if (queuePlan(c, "forge", { side: c.fac === 0 ? -1 : 1 })) return; }
@@ -1844,11 +2185,67 @@ function planBuild(c) {
   if (pop >= 9 && haveCount(c, "scarecrow") === 0 && s.wood >= 5 && (H2.crops || []).length > 6 && !c.plans.some((p) => p.type === "scarecrow")) { const sp = farmSpot({}, c); if (sp) { if (queuePlan(c, "scarecrow", { site: { x0: sp.x, y0: sp.y, gys: [sp.y] } })) return; } }
   if (H2.warPlan && H2.cfg.war) { if (H2.warPlan(c, can)) return; }
   // keep growing: one more house when everyone has a bed already and there are spare resources
-  if (pop >= 6 && housing < pop + 3 && s.wood > 80 && !c.plans.some((p) => p.type === "house") && can("house", 1)) { queuePlan(c, "house"); }
+  if (pop >= 6 && housing < pop + 3 && s.wood > 80 && !housePlanned && can("house", 1)) { if (planHouse(c, can)) return; }
+  // beautify the town once the basics are there
+  if (hasHall && housing >= pop && planDecor(c, can)) return;
 }
+const HOUSING = { hut: 1, house: 1, townhouse: 1 };
+// pick a dwelling for the town's size and wealth; dense townhouses once the town is crowded
+function planHouse(c, can) {
+  const pop = c.pop;
+  const order = [];
+  if (pop >= 8 && (c.crowded >= 1 || rnd() < 0.45)) order.push("townhouse");
+  if (pop >= 3) order.push("house");
+  if (pop >= 8 && !order.includes("townhouse")) order.push("townhouse");
+  order.push("hut");
+  for (const t of order) {
+    if (!can(t, t === "hut" ? 0.8 : 0.6)) continue;
+    if (queuePlan(c, t, { mirror: rnd() < 0.5 })) { c.crowded = 0; return true; }
+    if (t !== "hut") c.crowded = (c.crowded || 0) + 0.5;
+  }
+  return false;
+}
+// street lamps, flower gardens, a fountain and a statue between the houses
+function decorSite(c, w) {
+  const e = c.ext; if (!e) return null;
+  const cx = c.x, span = Math.max(cx - e[0], e[1] - cx) + 3;
+  for (let off = 0; off <= span; off++) for (const sg of [1, -1]) {
+    const x0 = Math.round(cx + sg * off - w / 2); if (x0 < 2 || x0 + w > width - 2 || x0 < e[0] - 3 || x0 + w - 1 > e[1] + 3) continue;
+    if (overlaps(c, x0, x0 + w - 1, 0) || !ownTerritory(c, x0)) continue;
+    let ok = true, mn = 1e9, mx = -1e9; const gys = [];
+    for (let i = 0; i < w; i++) {
+      const g = columnGround(x0 + i); if (g < 8) { ok = false; break; }
+      const t = at(x0 + i, g + 1); if (!t || t.element === "farmland" || t.element === "hz_crop") { ok = false; break; }
+      gys.push(g); mn = Math.min(mn, g); mx = Math.max(mx, g);
+    }
+    if (!ok || mx - mn > 0) continue;
+    for (let i = -1; i <= w && ok; i++) for (let y = mn - 9; y <= mn; y++) { const o = at(x0 + i, y); if (o && (isPerson(o) ? false : (i >= 0 && i < w) || elements[o.element].pass)) { ok = false; break; } }
+    if (!ok) continue;
+    return { x0: x0, y0: mn, gys: gys };
+  }
+  return null;
+}
+function planDecor(c, can) {
+  if (c.plans.length || c.famine || c.war.state === "war" || c.war.state === "siege" || pixelTicks - (c.lastDecor || 0) < 900) return false;
+  const pop = c.pop, b = c.built, s = c.stock;
+  const opts = [];
+  if (pop >= 12 && !b.fountain && s.stone >= 16) opts.push("fountain");
+  if (pop >= 18 && !b.statue && s.stone >= 24) opts.push("statue");
+  if ((b.lamp || 0) < Math.min(14, Math.floor(pop / 3)) && s.wood >= 25) opts.push("lamp");
+  if ((b.garden || 0) < Math.min(10, Math.floor(pop / 4))) opts.push("garden");
+  if (!opts.length) return false;
+  c.lastDecor = pixelTicks;
+  const t = opts[0] === "fountain" || opts[0] === "statue" ? opts[0] : pick(opts);
+  if (!can(t, 1)) return false;
+  const bp = BLUEPRINTS[t](c);
+  const site = decorSite(c, bp.w); if (!site) return false;
+  return !!queuePlan(c, t, { site: site, nomargin: true });
+}
+H2.planHouse = planHouse;
 H2.planBuild = planBuild;
 function completePlan(c, pl) {
   c.built[pl.type] = (c.built[pl.type] || 0) + 1;
+  if (!DECOR[pl.type] && pl.type !== "moat" && pl.type !== "cannon") c.ext = c.ext ? [Math.min(c.ext[0], pl.x0), Math.max(c.ext[1], pl.x1)] : [pl.x0, pl.x1];
   if (MAJOR_BUILD[pl.type]) {
     let msg = c.name + " completes " + BUILD_NAMES[pl.type] + ".";
     if (pl.type === "wall") msg = "The great wall of " + c.name + " stands complete.";
@@ -1861,12 +2258,58 @@ function completePlan(c, pl) {
   census(true);
 }
 
+// create one blueprint cell in the world, with its colour and settlement metadata
+function placeCell(c, pl, cell) {
+  const el = cell[2], cx = pl.x0 + cell[0], cy = pl.y0 + cell[1];
+  if (!inb(cx, cy) || !elements[el]) return null;
+  createPixel(el, cx, cy);
+  const n = pixelMap[cx][cy];
+  if (n) {
+    const info = elements[el];
+    if (info && (info.st || info.door || el === "hz_cloth" || el === "hz_cannon")) { n.fac = c.fac; n.ay = pl.y0; }
+    if (info && info.hzb) { n.hzb2 = 1; n.fac = c.fac; n.cid = c.id; if (DECOR[pl.type]) n.dec = 1; }
+    const o3 = cell[3];
+    if (o3) {
+      if (o3.c) n.color = o3.c;
+      if (o3.sx !== undefined) { n.sx = pl.x0 + o3.sx; n.uf = pl.y0 + o3.uf; }
+      if (o3.ay !== undefined) n.ay = pl.y0 + o3.ay;
+      if (o3.nm) n.nm = o3.nm;
+      if (o3.flag) n.color = FAC[c.fac].flag;
+    }
+    if (el === "hz_cannon") { n.dir = pl.dir || (c.fac === 0 ? 1 : -1); n.ammo = 0; n.cd = 0; n.cid = c.id; }
+    if (el === "hz_stone" || el === "hz_plank" || el === "hz_roof" || el === "hz_palisade") n.fac = c.fac;
+  }
+  return n;
+}
+H2.placeCell = placeCell;
+// instantly raise a whole building (used by the "blueprint" tools and tests); ignores cost
+function instantBuild(c, pl) {
+  for (const cell of pl.cells) {
+    const x = pl.x0 + cell[0], y = pl.y0 + cell[1]; if (!inb(x, y)) continue;
+    const o = pixelMap[x][y];
+    if (cell[2] === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb) deletePixel(x, y); continue; }
+    if (o) { if (isPerson(o) || (elements[o.element].hzb && o.element !== "hz_earth" && !o.dec)) continue; deletePixel(x, y); }
+    placeCell(c, pl, cell);
+  }
+  const i = c.plans.indexOf(pl); if (i >= 0) c.plans.splice(i, 1);
+  completePlan(c, pl);
+}
+H2.instantBuild = instantBuild;
+
 /* ---- the build task ----------------------------------------------------------- */
 function cellOpenFor(p, x, y) { return true; }
 TASKS.build = function (p, t) {
   const c = colById(p.col); if (!c) return "done";
   const pl = c.plans[0] && c.plans[0].state !== "stalled" ? c.plans[0] : c.plans.find((q) => q.state !== "stalled");
   if (!pl) return "done";
+  // skip cells that need no work (already placed, nothing to dig) without spending the builder's time
+  for (let n = 0; n < 12 && pl.i < pl.cells.length; n++) {
+    const k = pl.cells[pl.i], kx = pl.x0 + k[0], ky = pl.y0 + k[1];
+    if (!inb(kx, ky)) { pl.i++; continue; }
+    const ko = pixelMap[kx][ky];
+    if (k[2] === "__dig" ? !ko || (!isPerson(ko) && (elements[ko.element].hzb || elements[ko.element].state === "liquid")) : ko && ko.element === k[2] && !isPerson(ko)) { pl.i++; continue; }
+    break;
+  }
   if (pl.i >= pl.cells.length) return "done";
   const cell = pl.cells[pl.i];
   const el = cell[2], cx = pl.x0 + cell[0], cy = pl.y0 + cell[1];
@@ -1875,7 +2318,7 @@ TASKS.build = function (p, t) {
   if (r === "fail") { t.fail = (t.fail || 0) + 1; if (t.fail > 3) { pl.i++; t.fail = 0; } return "done"; }
   if (r !== "arrive" && Math.abs(p.x - cx) > 5) return;
   if (pixelTicks < (p.buildCool || 0)) return;
-  p.buildCool = pixelTicks + 9;
+  p.buildCool = pixelTicks + (QUICK[el] ? 2 : Math.max(3, Math.round(6 - (p.sk.build || 0) * 0.6)));
   // is the cell already done?
   const o = pixelMap[cx][cy];
   if (el === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb && elements[o.element].state !== "liquid") deletePixel(cx, cy); pl.i++; return; }
@@ -1891,23 +2334,14 @@ TASKS.build = function (p, t) {
   const o2 = pixelMap[cx][cy];
   if (o2) {
     const oi = elements[o2.element];
-    if (oi.hzb && !(el === "water")) { pl.i++; return; }                                   // someone else's wall
+    if (oi.hzb && !o2.dec && !(el === "water")) { pl.i++; return; }                                   // someone else's wall
     if (el === "water" && oi.state === "liquid") { pl.i++; return; }
     deletePixel(cx, cy);                                                                      // clear brush, leaves, loose stuff
   }
   const need = COST[el] || {};
   for (const g in need) if ((c.stock[g] || 0) < need[g]) { pl.state = "stalled"; return "done"; }
   for (const g in need) c.stock[g] -= need[g];
-  createPixel(el, cx, cy);
-  const n = pixelMap[cx][cy];
-  if (n) {
-    const info = elements[el];
-    if (info && (info.st || info.door || el === "hz_cloth" || el === "hz_cannon")) { n.fac = c.fac; n.ay = pl.y0; }
-    if (info && info.hzb) n.hzb2 = 1;
-    if (cell[3] && cell[3].flag) { n.color = FAC[c.fac].flag; }
-    if (el === "hz_cannon") { n.dir = pl.dir || (c.fac === 0 ? 1 : -1); n.ammo = 0; n.cd = 0; n.cid = c.id; }
-    if (el === "hz_stone" || el === "hz_plank" || el === "hz_roof" || el === "hz_palisade") n.fac = c.fac;
-  }
+  placeCell(c, pl, cell);
   pl.i++; p.sk.build += 0.05;
 };
 
@@ -1922,6 +2356,8 @@ function pregnancyAndBirths(c) {
       if (pixelTicks >= w.preg && !w.sleeping) {
         const sp = H2.byId[w.sp];
         const x = w.x + (rnd() < 0.5 ? -1 : 1), y = w.y;
+        const bw = inb(x, y) && pixelMap[x][y];
+        if (bw && !isPerson(bw) && elements[bw.element].pass && !elements[bw.element].stair) openDoor(bw);   // indoors: step in front of the back wall
         if (isEmpty(x, y)) {
           w.preg = 0; w.lastBirth = pixelTicks;
           const tr = rollTraits([w.tr, sp && sp.tr]);
@@ -1940,11 +2376,388 @@ function pregnancyAndBirths(c) {
     const sp = H2.byId[w.sp]; if (!sp || sp.dead) continue;
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
-    if (H2.people.length >= H2.cfg.maxPeople) continue;
+    if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
     if (c.beds < c.pop + 0 || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }
+
+/* ======================================================================
+   ARCHITECTURE: faction building styles & procedural blueprints
+   Every building is generated fresh from its faction's style with random
+   proportions, roof shapes, materials, windows, chimneys and ornaments,
+   so no two houses look alike — but a town still looks like one town.
+   Blueprint coordinates: dx 0..w-1 from the left, dy 0 = the floor row
+   people stand in, negative = up. Interior rows 0..-2 are always kept free
+   (except furniture on row 0) so 2-pixel villagers can walk through.
+   ====================================================================== */
+function hexRgb(h) { h = String(h).replace("#", ""); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+function shade(hex, f, j) {   // colour with brightness factor f and random jitter j -> "rgb(r,g,b)"
+  const c = hexRgb(hex); const k = (f || 1) * (1 + (rnd() * 2 - 1) * (j === undefined ? 0.045 : j));
+  return "rgb(" + c.map((v) => clamp(Math.round(v * k), 0, 255)).join(",") + ")";
+}
+H2.shade = shade;
+const STYLES = [
+  { key: "northern", name: "Northern timber-frame",
+    wall: ["#efe8d6", "#e9e1cc", "#f3eee2", "#e4dccb", "#dfe6ea", "#ece4cf"], frame: ["#4a3122", "#553826", "#3f2a1d"],
+    roof: ["#3b4656", "#45536a", "#34404f", "#4a5a6e", "#3d5a66", "#5a4636"], trim: ["#2f5fa8", "#2b4c7e", "#3a6fb8"],
+    shutter: ["#2f5fa8", "#2e6b52", "#7a2d2d", "#2b4c7e"], door: ["#5b3b22", "#4f331e", "#2f4f7a", "#3b2a1c"],
+    base: ["#8d8f93", "#7f8287", "#999ba0"], floor: ["#7a5434", "#6e4b2e"], path: ["#8f8a80", "#9a948a"], glass: ["#cfe8f7", "#bcdcf0", "#d9eef8"],
+    flowers: ["#e0457b", "#f4d03f", "#ffffff", "#b05cc8", "#ff7f50", "#5aa9e6"], chim: ["#8a5a48", "#7d6a5c", "#6f5f55"], thatch: ["#b8954a", "#a8853e", "#c4a159"],
+    stone: ["#8a8d92", "#7d8085", "#94979c"], statue: "#7f9c8a", dome: "#3d5a66",
+    houseRoofs: ["gable", "steep", "gable", "steep", "gambrel"], hallRoof: "gable", chimney: 0.8 },
+  { key: "southern", name: "Southern terracotta",
+    wall: ["#f0d9b5", "#e8c99a", "#f2e3c9", "#e7b98f", "#f4cfb4", "#ead6b8", "#f5e6d0"], frame: ["#fbf6ec", "#f3ecdc"],
+    roof: ["#c25a2c", "#b34d26", "#cf6a38", "#a8452a", "#d4743f"], trim: ["#fbf6ec", "#f3ecdc", "#e9dfc9"],
+    shutter: ["#2e7d6b", "#2f6f8f", "#8b3a2e", "#3d8a5a", "#3a5f9f"], door: ["#6b3a1e", "#7a4524", "#3f5f4a", "#5a2f1a"],
+    base: ["#c9b28c", "#bfa47c", "#d2bc96"], floor: ["#b5653e", "#a9592f"], path: ["#cbb48e", "#c2a984"], glass: ["#d8eef5", "#c8e6f0"],
+    flowers: ["#d62828", "#f77f00", "#fcbf49", "#e85d75", "#ffffff", "#c13584"], chim: ["#e6d2b2", "#d9c3a0"], thatch: ["#c9a35a", "#b8924c"],
+    stone: ["#d2bc96", "#c9b28c", "#dcc8a4"], statue: "#ece8df", dome: "#d9a441",
+    houseRoofs: ["low", "low", "flat", "low", "flat"], hallRoof: "dome", chimney: 0.35 },
+];
+H2.STYLES = STYLES;
+function subset(a, n) { const b = a.slice(); for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = b[i]; b[i] = b[j]; b[j] = t; } return b.slice(0, Math.min(n, b.length)); }
+function styleOf(c) { return STYLES[(c ? c.fac : 0) % STYLES.length] || STYLES[0]; }
+// each town picks a local palette (its "quarry and dyes"), so it looks harmonious while every house still differs
+function matsOf(c) {
+  const S = styleOf(c);
+  if (c && c.mat && c.mat.k === S.key) return c.mat;
+  const m = { k: S.key, wall: subset(S.wall, 3), roof: subset(S.roof, 2), shutter: subset(S.shutter, 2), door: subset(S.door, 2), roofs: S.houseRoofs };
+  if (c) c.mat = m;
+  return m;
+}
+function palette(c) {
+  const S = styleOf(c), M = matsOf(c);
+  return { S: S, wall: rnd() < 0.85 ? pick(M.wall) : pick(S.wall), roof: rnd() < 0.85 ? pick(M.roof) : pick(S.roof), frame: pick(S.frame), trim: pick(S.trim),
+    shutter: pick(M.shutter), door: pick(M.door), base: pick(S.base), floor: pick(S.floor), path: pick(S.path), glass: pick(S.glass), chim: pick(S.chim),
+    thatch: pick(S.thatch), stone: pick(S.stone), flowers: S.flowers, north: S.key === "northern" };
+}
+H2.palette = palette;
+
+/* ---- plot: a sparse grid that later cells may overwrite ---- */
+function Plot(w) {
+  const m = new Map();
+  const P = { w: w, beds: 0, floor: null,
+    set(x, y, el, col, o) { const op = Object.assign({}, o || {}); if (col) op.c = col; m.set(x + "," + y, [x, y, el, op]); return P; },
+    get(x, y) { return m.get(x + "," + y); }, has(x, y) { return m.has(x + "," + y); }, del(x, y) { m.delete(x + "," + y); return P; },
+    top(x) { let t = 1e9; for (const v of m.values()) if (v[0] === x && v[1] < t) t = v[1]; return t; },
+    done() {
+      const b = BP(w); let h = 0, beds = 0;
+      for (const v of m.values()) { b.cells.push(v); if (-v[1] > h) h = -v[1]; if (v[2] === "hz_bed") beds++; }
+      b.h = h; b.floorC = P.floor; b.beds = beds; b.style = P.style; b.pathC = P.path; b.baseC = P.base;
+      return b;
+    } };
+  return P;
+}
+const C = (hex, f) => shade(hex, f || 1);
+
+/* ---- roofs ------------------------------------------------------------------
+   E = eave row (also the ceiling), L..R = span incl. overhang. fillEl/fillC = gable infill. */
+function roof(P, pal, shape, E, L, R, o) {
+  o = o || {};
+  const rc = o.roofC || pal.roof, fillEl = o.fillEl || "hz_plaster", fillC = o.fillC || pal.wall;
+  const mid = (L + R) / 2;
+  const tile = (x, y, k) => P.set(x, y, "hz_roof", C(rc, k % 2 ? 0.9 : 1.02));
+  if (shape === "flat") {
+    for (let x = L; x <= R; x++) P.set(x, E, "hz_plaster", C(pal.trim, x === L || x === R ? 0.92 : 1));            // cornice
+    for (let x = L + 1; x <= R - 1; x++) {
+      const rel = x - (L + 1);
+      if (rel % 2 === 0 || x === L + 1 || x === R - 1) P.set(x, E - 1, "hz_plaster", C(pal.wall, 0.97));                 // parapet merlons
+      else if (rnd() < 0.45) P.set(x, E - 1, "hz_flowerbox", C(pick(pal.flowers)), { late: 1 });                    // roof-terrace planters
+    }
+    return E - 1;
+  }
+  if (shape === "dome") {
+    const r = Math.max(2, Math.floor((R - L) / 2) - 1);
+    for (let x = L; x <= R; x++) P.set(x, E, "hz_plaster", C(pal.trim));
+    let top = E;
+    for (let k = 1; k <= r + 1; k++) {
+      for (let x = L + 1; x <= R - 1; x++) {
+        const dx = x - mid, dy = k - 0.5;
+        if (dx * dx + dy * dy * 1.15 <= r * r + r * 0.6) { P.set(x, E - k, o.domeEl || "hz_roof", C(o.domeC || pal.S.dome, k % 2 ? 0.94 : 1.04)); top = Math.min(top, E - k); }
+      }
+    }
+    const cx = Math.round(mid);
+    P.set(cx, top - 1, "hz_gold", C("#e2b33c")).set(cx, top - 2, "hz_gold", C("#f0c75a"));
+    return top - 2;
+  }
+  // pitched roofs: gable (45°), steep (2 rows per step), low (2 cols per row), gambrel (steep then shallow)
+  let top = E;
+  for (let k = 0; ; k++) {
+    let inset;
+    if (shape === "steep") inset = Math.floor((k + 1) / 2);
+    else if (shape === "low") inset = 2 * k;
+    else if (shape === "gambrel") { const kk = Math.ceil((R - L) / 6); inset = k <= kk ? Math.floor(k / 2) : Math.floor(kk / 2) + (k - kk) * 2; }
+    else inset = k;
+    const xl = L + inset, xr = R - inset;
+    if (xl > xr) break;
+    const y = E - k; top = y;
+    const thick = shape === "low" ? 2 : shape === "steep" ? 1 : 2;
+    for (let x = xl; x <= xr; x++) {
+      const edge = k === 0 || x - xl < thick || xr - x < thick || xr - xl <= 2 * thick;
+      if (edge) tile(x, y, k);
+      else if (o.fillEl) P.set(x, y, fillEl, C(fillC, 0.97));
+      else P.set(x, y, "hz_roof", C(rc, (k % 2 ? 0.74 : 0.8) + ((x + k) % 4 === 0 ? 0.06 : 0)));       // tiled courses, shaded under the ridge
+    }
+  }
+  // a little attic window in tall gables
+  if (o.attic && E - top >= 4) {                                                       // a dormer / attic window with a little frame
+    const cx = Math.round(mid), y = E - 2;
+    if (P.has(cx, y - 1) && P.has(cx - 1, y) && P.has(cx + 1, y)) { P.set(cx, y, "hz_window", C(pal.glass)); P.set(cx, y - 1, pal.north ? "hz_beam" : "hz_plaster", C(pal.north ? pal.frame : pal.trim)); }
+  }
+  return top;
+}
+function chimney(P, pal, x, E) {
+  const t = P.top(x); if (t >= E) return;
+  // a brick stack rising out of the roof slope (2 courses) with a smoking cap
+  P.set(x, t, "hz_stone", C(pal.chim, 0.9)).set(x, t - 1, "hz_stone", C(pal.chim, 1.05)).set(x, t - 2, "hz_stone", C(pal.chim, 0.95));
+  P.set(x, t - 3, "hz_chimney", C(pal.chim, 0.8));
+}
+// window positions inside a wall band (every third column, never at the end posts)
+function windowCols(w) { const a = []; for (let x = 2; x <= w - 3; x += 3) a.push(x); if (!a.length && w >= 3) a.push(Math.floor(w / 2)); return a; }
+function band(P, pal, y0, rows, w, o) {
+  o = o || {};
+  const wins = o.noWin ? [] : windowCols(w);
+  for (let k = 0; k < rows; k++) {
+    const y = y0 - k, rail = pal.north && rows >= 2 && k === rows - 1;
+    for (let x = 0; x < w; x++) {
+      const post = x === 0 || x === w - 1;
+      if (pal.north && !o.stoneWall && (post || rail || (o.frame && x % 3 === 0 && !wins.includes(x)))) { P.set(x, y, "hz_beam", C(pal.frame)); continue; }
+      if (wins.includes(x) && !rail) { P.set(x, y, "hz_window", C(pal.glass)); continue; }
+      P.set(x, y, o.stoneWall ? "hz_stone" : "hz_plaster", C(o.stoneWall ? pal.stone : pal.wall, post ? 0.94 : 1));
+    }
+  }
+}
+// the two end walls (doors on rows 0,-1 or an open archway; lintel on row -2; more wall above for tall rooms)
+function ends(P, pal, w, ih, o) {
+  o = o || {};
+  for (const ex of [0, w - 1]) {
+    const open = o.open === "both" || (o.open === "left" && ex === 0) || (o.open === "right" && ex === w - 1);
+    if (!open) P.set(ex, 0, o.gate ? "hz_gate" : "hz_door", C(pal.door)).set(ex, -1, o.gate ? "hz_gate" : "hz_door", C(pal.door, 0.92));
+    for (let y = -2; y >= -(ih - 1); y--) {
+      if (y === -2) P.set(ex, y, pal.north ? "hz_beam" : "hz_plaster", C(pal.north ? pal.frame : pal.trim));
+      else if (y === -3 && ih >= 5) P.set(ex, y, "hz_window", C(pal.glass));
+      else P.set(ex, y, o.stoneWall ? "hz_stone" : (pal.north ? "hz_beam" : "hz_plaster"), C(o.stoneWall ? pal.stone : pal.north ? pal.frame : pal.wall));
+    }
+  }
+  if (o.lantern !== false && rnd() < 0.7) { const ex = rnd() < 0.5 ? 0 : w - 1; P.set(ex, -2, "hz_lantern", null, { late: 1 }); }
+}
+function pickRoof(c, pal, w) { const M = matsOf(c); let r = pick(M.roofs); if (r === "gambrel" && w < 9) r = "gable"; if (r === "steep" && w > 10) r = rnd() < 0.5 ? "gambrel" : "gable"; return r; }
+/* the cut-away back wall of every room: darker (in shadow), with windows that glow at night.
+   Villagers walk in front of it, so a house looks solid but stays fully walkable. */
+function interior(P, pal, x0, x1, y0, y1, o) {
+  o = o || {};
+  const base = o.wallC || pal.wall, dk = o.dark || 0.62;
+  const wins = o.noWin ? [] : windowCols(x1 - x0 + 3).map((x) => x + x0 - 1);
+  const winRows = y0 - y1 >= 2 ? [y0 - 1, y0 - 2] : [];
+  for (let y = y0; y >= y1; y--) for (let x = x0; x <= x1; x++) {
+    if (P.has(x, y)) continue;
+    let el = "hz_interior", col;
+    if (wins.includes(x) && winRows.includes(y)) { el = "hz_backwin"; col = C(pal.glass, 0.8); }
+    else if (pal.north && (x - x0) % 3 === 2 && !wins.includes(x)) col = C(pal.frame, 0.8);          // timber studs
+    else if (y === y0) col = C(o.dadoC || base, dk * 0.86);                                           // skirting / dado
+    else if (y === y1) col = C(base, dk * 0.9);                                                       // shadow under the ceiling
+    else col = C(base, dk + (x % 2 ? 0.02 : 0));
+    P.set(x, y, el, col);
+  }
+}
+
+/* ---- dwellings -------------------------------------------------------------- */
+function genHut(c) {
+  const pal = palette(c), w = rint(4, 6), P = Plot(w); P.style = pal.S.key; P.floor = pal.floor; P.path = pal.path; P.base = pal.base;
+  // one door, the other end an open porch; plank walls and a thatched roof
+  P.set(w - 1, 0, "hz_door", C(pal.door)).set(w - 1, -1, "hz_door", C(pal.door, 0.92)).set(w - 1, -2, "hz_plank", C("#9c7040"));
+  P.set(0, -2, "hz_plank", C("#9c7040"));
+  P.set(w - 2, 0, "hz_bed");
+  interior(P, pal, 1, w - 2, 0, -2, { wallC: "#a67b47", noWin: w < 6 });
+  roof(P, pal, pal.north ? "steep" : "low", -3, -1, w, { roofC: pal.thatch });
+  return P.done();
+}
+function genCottage(c) {
+  const pal = palette(c), w = rint(6, 11), P = Plot(w); P.style = pal.S.key; P.floor = pal.floor; P.path = pal.path; P.base = pal.base;
+  ends(P, pal, w, 3);
+  band(P, pal, -3, 1, w);
+  // furniture: hearth under the chimney, beds, a chest
+  const slots = []; for (let x = 2; x <= w - 3; x++) slots.push(x);
+  const hasChim = rnd() < pal.S.chimney;
+  const hx = hasChim ? (rnd() < 0.5 ? slots[0] : slots[slots.length - 1]) : -1;
+  if (hasChim) P.set(hx, 0, "hz_hearth");
+  let beds = 0; const want = w >= 10 ? 4 : w >= 8 ? 3 : 2;
+  for (const x of (hx === slots[0] ? slots.slice().reverse() : slots)) { if (x === hx) continue; if (beds < want) { P.set(x, 0, "hz_bed"); beds++; } else if (rnd() < 0.5) { P.set(x, 0, "hz_chest"); break; } }
+  interior(P, pal, 1, w - 2, 0, -2);
+  const shape = pickRoof(c, pal, w);
+  roof(P, pal, shape, -4, -1, w, { attic: true });
+  if (hasChim) chimney(P, pal, hx, -4);
+  // window boxes under the band windows on the outside of the end walls
+  if (rnd() < 0.6) { P.set(-1, -3, "hz_flowerbox", C(pick(pal.flowers)), { late: 1 }); }
+  if (rnd() < 0.6) { P.set(w, -3, "hz_flowerbox", C(pick(pal.flowers)), { late: 1 }); }
+  return P.done();
+}
+// two storeys: ground floor (rows 0..-2), plank floor on row -3 with a staircase, upper floor rows -4..-6
+function genTownhouse(c) {
+  const pal = palette(c), w = rint(10, 15), P = Plot(w); P.style = pal.S.key; P.floor = pal.floor; P.path = pal.path; P.base = pal.base;
+  const a = 2, foot = a - 1, uf = -4;
+  ends(P, pal, w, 3);
+  // staircase rising to the right: (a,0) / (a+1,0..-1) / (a+2,0..-2)
+  for (let i = 0; i < 3; i++) for (let k = 0; k <= i; k++) P.set(a + i, -k, "hz_stair", C(pal.north ? "#8a6440" : "#b08650", k % 2 ? 0.94 : 1.04), { sx: foot, uf: uf });
+  // upper floor planks (with stairwell opening above the stairs)
+  for (let x = 0; x < w; x++) { if (x === a + 1 || x === a + 2) continue; P.set(x, -3, "hz_plank", C(pal.floor, 1.05), { sx: foot, uf: uf }); }
+  // ground floor furniture
+  const hasChim = rnd() < pal.S.chimney + 0.1;
+  const gx0 = a + 3;
+  if (hasChim) P.set(gx0, 0, "hz_hearth");
+  for (let x = gx0 + 1; x <= w - 3; x++) P.set(x, 0, "hz_bed");
+  // upper floor: beds beyond the landing; outer walls with windows at both ends
+  for (let x = a + 4; x <= w - 2; x++) P.set(x, uf, "hz_bed", null, { sx: foot, uf: uf, ay: uf });
+  for (const ex of [0, w - 1]) {
+    P.set(ex, -4, pal.north ? "hz_beam" : "hz_plaster", C(pal.north ? pal.frame : pal.wall));
+    P.set(ex, -5, "hz_window", C(pal.glass)).set(ex, -6, "hz_window", C(pal.glass));
+    P.set(ex + (ex === 0 ? -1 : 1), -4, "hz_flowerbox", C(pick(pal.flowers)), { late: 1 });
+  }
+  // north: jettied upper storey with timber braces; south: a balcony rail on one end
+  if (pal.north) { P.set(-1, -3, "hz_beam", C(pal.frame)).set(w, -3, "hz_beam", C(pal.frame)); }
+  interior(P, pal, 1, w - 2, 0, -2);
+  interior(P, pal, 1, w - 2, -4, -6, { dadoC: pal.floor });
+  interior(P, pal, a + 1, a + 2, -3, -3, { noWin: true });
+  band(P, pal, -7, 1, w, { frame: pal.north });
+  const shape = pickRoof(c, pal, w);
+  roof(P, pal, shape, -8, -1, w, { attic: true });
+  if (hasChim) chimney(P, pal, gx0, -8);
+  return P.done();
+}
+
+/* ---- public buildings ------------------------------------------------------- */
+function genHall(c) {
+  const pal = palette(c), w = c && c.pop < 12 ? 13 : 13 + 2 * rint(0, c && c.pop < 30 ? 1 : 3), P = Plot(w), ih = 4; P.style = pal.S.key; P.floor = pal.floor; P.path = pal.path; P.base = pal.base;
+  ends(P, pal, w, ih, { lantern: false });
+  P.set(0, -2, "hz_lantern", null, { late: 1 }).set(w - 1, -2, "hz_lantern", null, { late: 1 });
+  band(P, pal, -ih, 2, w, { frame: pal.north });
+  const mid = Math.floor(w / 2);
+  P.set(3, 0, "hz_hearth").set(w - 4, 0, "hz_chest");
+  // tapestries (faction colour) hang on the back wall between the windows
+  for (let x = 5; x <= w - 6; x += 4) P.set(x, -2, "hz_interior", null, { flag: 1 }).set(x, -3, "hz_interior", null, { flag: 1 });
+  interior(P, pal, 1, w - 2, 0, -(ih - 1), { dark: 0.58 });
+  let top;
+  if (pal.north) {
+    top = roof(P, pal, w >= 15 ? "gambrel" : "gable", -ih - 2, -1, w, { attic: true });
+    // carved crossed beams ("dragon heads") at the ridge, banner pole on top
+    P.set(mid - 1, top - 1, "hz_beam", C(pal.frame)).set(mid + 1, top - 1, "hz_beam", C(pal.frame)).set(mid - 2, top - 2, "hz_beam", C(pal.frame)).set(mid + 2, top - 2, "hz_beam", C(pal.frame));
+    P.set(mid, top - 1, "hz_beam", C(pal.frame)).set(mid, top - 2, "hz_beam", C(pal.frame)).set(mid, top - 3, "hz_beam", C(pal.frame));
+    P.set(mid + 1, top - 3, "hz_banner", null, { flag: 1 }).set(mid + 1, top - 4, "hz_cloth", null, { flag: 1 }).set(mid + 2, top - 4, "hz_cloth", null, { flag: 1 }).set(mid, top - 4, "hz_gold", C("#e2b33c"));
+    chimney(P, pal, 3, -ih - 2);
+  } else {
+    // flat cornice wings and a gilded dome on a drum in the middle
+    for (let x = -1; x <= w; x++) P.set(x, -ih - 2, "hz_plaster", C(pal.trim));
+    for (let x = 0; x < w; x += 2) P.set(x, -ih - 3, "hz_plaster", C(pal.wall, 0.96));
+    const dr = 3, dl = mid - dr, drr = mid + dr;
+    for (let x = dl; x <= drr; x++) { P.set(x, -ih - 3, x === dl || x === drr ? "hz_plaster" : (x - dl) % 2 ? "hz_window" : "hz_plaster", C((x - dl) % 2 && x !== dl && x !== drr ? pal.glass : pal.wall)); P.set(x, -ih - 4, "hz_plaster", C(pal.trim)); }
+    top = roof(P, pal, "dome", -ih - 4, dl - 1, drr + 1, {});
+    for (let y = -ih - 3; y >= -ih - 5; y--) P.set(1, y, "hz_beam", C("#6c4f30"));
+    P.set(1, -ih - 6, "hz_banner", null, { flag: 1 }).set(2, -ih - 6, "hz_cloth", null, { flag: 1 }).set(2, -ih - 5, "hz_cloth", null, { flag: 1 }).set(1, -ih - 7, "hz_gold", C("#e2b33c"));
+  }
+  return P.done();
+}
+function genWorkshop(c, kind) {
+  const pal = palette(c);
+  const spec = {
+    forge: { w: rint(7, 10), stoneWall: true, furn: [[2, "hz_anvil"], [4, "hz_forgefire"]], chim: 4, roof: pal.north ? "gable" : "flat", open: "left" },
+    bakery: { w: rint(6, 9), furn: [[2, "hz_mill"], [4, "hz_oven"]], chim: 4, roof: pal.north ? "steep" : "low", open: "left" },
+    hospital: { w: rint(9, 11), furn: [[2, "hz_cot"], [4, "hz_cot"], [6, "hz_cot"]], roof: pal.north ? "gable" : "flat", white: true },
+    barracks: { w: 11, stoneWall: true, gate: true, furn: [[2, "hz_rack"], [3, "hz_dummy"], [5, "hz_dummy"], [7, "hz_bed"], [8, "hz_bed"]], roof: pal.north ? "gable" : "flat", banner: true },
+  }[kind];
+  const w = spec.w, P = Plot(w); P.style = pal.S.key; P.floor = pal.floor; P.path = pal.path; P.base = pal.base;
+  if (spec.white) pal.wall = pal.north ? "#f4f4f0" : "#fbf8f2";
+  ends(P, pal, w, 3, { stoneWall: spec.stoneWall, gate: spec.gate, open: spec.open });
+  band(P, pal, -3, 1, w, { stoneWall: spec.stoneWall, frame: pal.north && !spec.stoneWall });
+  for (const f of spec.furn) if (f[0] < w - 1) P.set(f[0], 0, f[1]);
+  if (kind === "hospital") for (let x = 8; x < w - 1; x += 2) P.set(x, 0, "hz_cot");
+  interior(P, pal, 1, w - 2, 0, -2, { wallC: spec.stoneWall ? pal.stone : pal.wall, dark: spec.stoneWall ? 0.7 : 0.62 });
+  const top = roof(P, pal, spec.roof, -4, -1, w, {});
+  if (spec.chim) chimney(P, pal, spec.chim, -4);
+  if (kind === "hospital") { const cx = Math.floor(w / 2), t = P.top(cx); P.set(cx, t - 1, "hz_medcross").set(cx, t - 2, "hz_medcross").set(cx - 1, t - 2, "hz_medcross").set(cx + 1, t - 2, "hz_medcross").set(cx, t - 3, "hz_medcross"); }
+  if (spec.banner) { const t = P.top(5); P.set(5, t - 1, "hz_banner", null, { flag: 1 }).set(6, t - 1, "hz_cloth", null, { flag: 1 }); }
+  return P.done();
+}
+function genMarket(c) {
+  const pal = palette(c), w = 7, P = Plot(w); P.style = pal.S.key; P.path = pal.path; P.base = pal.base;
+  const wood = pal.north ? "#6c4f30" : "#8a6440";
+  for (const x of [0, w - 1]) for (let y = 0; y >= -3; y--) P.set(x, y, "hz_plinth", C(wood, 0.95));       // walk-through posts
+  const stripe = [FAC[c ? c.fac : 0].flag, pal.north ? "#f3eee2" : "#fbf6ec"];
+  for (let x = -1; x <= w; x++) P.set(x, -4, "hz_cloth", C(stripe[(x + 2) % 2]), { late: 0 });              // striped awning
+  for (let x = 0; x < w; x += 2) P.set(x, -5, "hz_cloth", C(stripe[0], 0.9));
+  P.set(-1, -3, "hz_cloth", C(stripe[1])).set(w, -3, "hz_cloth", C(stripe[1]));
+  P.set(1, 0, "hz_chest").set(3, -3, "hz_stall", null, { flag: 1 }).set(w - 2, 0, "hz_beam", C("#7a4e24"));   // crates & barrel
+  return P.done();
+}
+function genWell(c) {
+  const pal = palette(c), P = Plot(4); P.style = pal.S.key; P.base = pal.base; P.path = pal.path;
+  P.set(0, 0, "hz_stone", C(pal.stone)).set(1, 0, "hz_well").set(2, 0, "hz_well").set(3, 0, "hz_stone", C(pal.stone));
+  const wood = pal.north ? "#5a3d28" : "#8a6440";
+  for (const x of [0, 3]) for (let y = -1; y >= -3; y--) P.set(x, y, "hz_plinth", C(wood));
+  P.set(1, -2, "hz_plinth", C("#6b6f78")).set(2, -2, "hz_plinth", C("#3a3a3a"));                               // winch & bucket rope
+  for (let x = -1; x <= 4; x++) P.set(x, -4, "hz_roof", C(pal.north ? pal.roof : pick(pal.S.roof)));
+  P.set(1, -5, "hz_roof", C(pal.roof, 0.92)).set(2, -5, "hz_roof", C(pal.roof, 0.92));
+  return P.done();
+}
+function genTower(c) {
+  const pal = palette(c), P = Plot(3); P.style = pal.S.key; P.base = pal.base; P.path = pal.path;
+  P.set(0, 0, "hz_gate", C(pal.door)).set(0, -1, "hz_gate", C(pal.door)).set(2, 0, "hz_gate", C(pal.door)).set(2, -1, "hz_gate", C(pal.door));
+  for (let y = -2; y >= -7; y--) { P.set(0, y, "hz_stone", C(pal.stone, y % 2 ? 0.95 : 1.04)).set(1, y, y === -4 ? "hz_window" : "hz_stone", C(y === -4 ? pal.glass : pal.stone)).set(2, y, "hz_stone", C(pal.stone, y % 2 ? 1.04 : 0.95)); }
+  for (let x = -1; x <= 3; x++) P.set(x, -8, "hz_stone", C(pal.stone, 0.9));
+  P.set(1, -9, "hz_post");
+  P.set(-1, -9, "hz_stone", C(pal.stone)).set(3, -9, "hz_stone", C(pal.stone));                               // merlons
+  P.set(3, -10, "hz_cloth", null, { flag: 1, late: 1 });
+  return P.done();
+}
+function genWall(c) {
+  const pal = palette(c), P = Plot(2); P.style = pal.S.key; P.base = pal.base; P.path = pal.path;
+  for (let x = 0; x < 2; x++) { P.set(x, 0, "hz_gate", C(pal.door)).set(x, -1, "hz_gate", C(pal.door)); for (let y = -2; y >= -5; y--) P.set(x, y, "hz_stone", C(pal.stone, (x + y) % 2 ? 0.94 : 1.04)); }
+  P.set(0, -6, "hz_stone", C(pal.stone));
+  return P.done();
+}
+
+/* ---- town decoration -------------------------------------------------------- */
+function genLamp(c) {
+  const pal = palette(c), P = Plot(1); P.style = pal.S.key;
+  const metal = pal.north ? "#2b2b30" : "#3a2f28";
+  P.set(0, 0, "hz_lamppost", C(metal)).set(0, -1, "hz_lamppost", C(metal)).set(0, -2, "hz_lamppost", C(metal)).set(0, -3, "hz_lantern");
+  return P.done();
+}
+function genGarden(c) {
+  const pal = palette(c), w = rint(2, 4), P = Plot(w); P.style = pal.S.key;
+  const fl = subset(pal.flowers, 2);
+  for (let x = 0; x < w; x++) {
+    P.set(x, 0, "hz_flower", C(rnd() < 0.3 ? "#3f8f2a" : pick(fl)));
+    if (rnd() < 0.35) P.set(x, -1, "hz_flower", C(pick(fl), 1.05));                                             // taller blooms
+  }
+  if (w >= 3 && rnd() < 0.5) { const x = rint(0, w - 1); P.set(x, -1, "hz_flower", C("#3f8f2a")).set(x, -2, "hz_flower", C("#f4c430")); }   // a sunflower
+  return P.done();
+}
+function genFountain(c) {
+  const pal = palette(c), w = 5, P = Plot(w); P.style = pal.S.key; P.floor = pal.path; P.path = pal.path; P.base = pal.base;
+  for (let x = 0; x < w; x++) P.set(x, 0, x === 0 || x === w - 1 ? "hz_plinth" : "hz_spray", x === 0 || x === w - 1 ? C(pal.stone) : null);
+  P.set(2, -1, "hz_plinth", C(pal.stone)).set(1, -2, "hz_plinth", C(pal.stone)).set(2, -2, "hz_plinth", C(pal.stone)).set(3, -2, "hz_plinth", C(pal.stone));
+  P.set(2, -3, "hz_spray").set(2, -4, "hz_spray").set(1, -3, "hz_spray").set(3, -3, "hz_spray").set(0, -2, "hz_spray").set(4, -2, "hz_spray");
+  return P.done();
+}
+function genStatue(c) {
+  const pal = palette(c), w = 3, P = Plot(w); P.style = pal.S.key; P.path = pal.path; P.base = pal.base;
+  const hero = c && (c.hero || c.founder) || "the Founder";
+  for (let x = 0; x < w; x++) { P.set(x, 0, "hz_plinth", C(pal.stone)); P.set(x, -1, "hz_plinth", C(pal.stone, 0.95)); P.set(x, -2, "hz_plinth", C(pal.trim === "#2f5fa8" ? pal.stone : pal.trim)); }
+  const m = pal.S.statue, o = { nm: hero };
+  P.set(1, -3, "hz_statue", C(m), o).set(1, -4, "hz_statue", C(m, 1.05), o).set(1, -5, "hz_statue", C(m, 1.08), o).set(1, -6, "hz_statue", C(m, 1.12), o);
+  P.set(0, -5, "hz_statue", C(m), o).set(2, -5, "hz_statue", C(m), o).set(2, -6, "hz_statue", C(m), o).set(2, -7, "hz_gold", C("#f0c75a"));  // raised torch
+  return P.done();
+}
+Object.assign(BLUEPRINTS, {
+  hut: genHut, house: genCottage, townhouse: genTownhouse, hall: genHall, market: genMarket, well: genWell,
+  forge: (c) => genWorkshop(c, "forge"), bakery: (c) => genWorkshop(c, "bakery"), hospital: (c) => genWorkshop(c, "hospital"), barracks: (c) => genWorkshop(c, "barracks"),
+  tower: genTower, wall: genWall, lamp: genLamp, garden: genGarden, fountain: genFountain, statue: genStatue,
+});
+Object.assign(BUILD_NAMES, { townhouse: "a townhouse", lamp: "a street lamp", garden: "a flower garden", fountain: "a fountain", statue: "a statue" });
+Object.assign(MAJOR_BUILD, { fountain: 1, statue: 1 });
+const DECOR = { lamp: 1, garden: 1, fountain: 1, statue: 1 };
+H2.DECOR = DECOR;
 
 /* ======================================================================
    WAR: fog-of-war intel, scouts, projectiles, cannons
@@ -2589,8 +3402,12 @@ function doorsTick() {
     const r = d[i];
     if (pixelTicks < r.t) continue;
     if (!inb(r.x, r.y)) { d.splice(i, 1); continue; }
-    if (!pixelMap[r.x][r.y]) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.fac = r.fac; n.hzb2 = 1; if (r.ay !== undefined) n.ay = r.ay; if (r.color) n.color = r.color; if (r.hp !== undefined) n.hp = r.hp; } d.splice(i, 1); }
-    else { r.t = pixelTicks + 8; r.w = (r.w || 0) + 1; if (r.w > 60) d.splice(i, 1); }
+    if (!elements[r.el]) { d.splice(i, 1); continue; }
+    const o = pixelMap[r.x][r.y];
+    if (!o) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.hzb2 = 1; const k = r.keep || r; for (const key in k) if (key !== "x" && key !== "y" && key !== "el" && key !== "t" && key !== "w" && key !== "keep") n[key] = k[key]; } d.splice(i, 1); }
+    else if (!isPerson(o) && kindOf(o) !== 1 && !(o.element === r.el)) { d.splice(i, 1); }       // something else was built/fell here
+    else if (o.element === r.el) { d.splice(i, 1); }
+    else { r.t = pixelTicks + 8; r.w = (r.w || 0) + 1; if (r.w > 900) d.splice(i, 1); }
   }
 }
 runEveryTick(function () {

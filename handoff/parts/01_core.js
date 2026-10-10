@@ -13,7 +13,7 @@ if (window.H2 && window.H2.loaded) { console.warn("[Humanitize2] already loaded"
 /* ------------------------------------------------------------------ CONFIG */
 const H2 = window.H2 = {
   version: "2.0.0", loaded: true,
-  cfg: { events: true, maxPeople: 90, verbose: false, birth: true, war: true, speed: 1 },
+  cfg: { events: true, maxPeople: 1000, maxPerFaction: 500, townSize: 60, expand: true, verbose: false, birth: true, war: true, speed: 1 },
   people: [], byId: {}, st: {}, cols: [], colSeq: 1, idSeq: 1, doors: [], chron: [],
   sightings: [], projectiles: 0, stats: { births: 0, deaths: 0, battles: 0 },
 };
@@ -90,7 +90,7 @@ function kindOf(o) {
   if (!o) return 0;
   const e = elements[o.element];
   if (!e) return 2;
-  if (o.element === "hz_door" || o.element === "hz_gate") return 3;
+  if (e.door || e.pass) return 3;
   if (o.burning || o.temp > HAZ_TEMP_HI || o.temp < HAZ_TEMP_LO) return 4;
   if (e.hazard) return 4;
   if (e.state === "liquid" || e.state === "gas") return 1;

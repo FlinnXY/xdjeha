@@ -54,15 +54,18 @@ function census(full) {
   if (maxId >= H2.idSeq) H2.idSeq = maxId + 1;
   if (maxCol >= H2.colSeq) H2.colSeq = maxCol + 1;
   // colonies: recompute headcounts
+  const fp = [];
   for (const c of H2.cols) { c.pop = 0; c.kids = 0; c.adults = 0; c.sold = 0; c.jobs = {}; c.sick = 0; c.hungry = 0; c.moodSum = 0; }
   for (let i = 0; i < ppl.length; i++) {
     let c = colById(ppl[i].col);
     if (!c) { c = colonyFor(ppl[i].fac, ppl[i].x, ppl[i].y); ppl[i].col = c.id; }
     if (c.fac !== ppl[i].fac) { /* defector */ }
-    c.pop++;
+    c.pop++; fp[c.fac] = (fp[c.fac] || 0) + 1;
+    if (!c.founder) c.founder = ppl[i].first + " " + ppl[i].sn;
     if (isChildPx(ppl[i])) c.kids++; else { c.adults++; c.jobs[ppl[i].job] = (c.jobs[ppl[i].job] || 0) + 1; if (ppl[i].job === "soldier" || ppl[i].job === "sentry" || ppl[i].job === "scout") c.sold++; }
     if (ppl[i].sick) c.sick++; if (ppl[i].hu < 25) c.hungry++; c.moodSum += ppl[i].mo;
   }
+  H2.facPop = fp;
   if (full) {
     const st = {};
     for (let i = 0; i < cp.length; i++) {
@@ -73,22 +76,25 @@ function census(full) {
     H2.st = st;
     for (const c of H2.cols) {
       c.beds = 0;
-      const halls = (st.hall || []).filter((s) => s.fac === c.fac && Math.abs(s.x - c.x) < 90);
+      const halls = (st.hall || []).filter((s) => s.fac === c.fac && Math.abs(s.x - c.x) < 90 && ownedBy(s, c));
       const hall = H2.nearestOf(halls, c.x, c.y, 200);
       c.hall = hall ? { x: hall.x, y: hall.ay !== undefined ? hall.ay : hall.y } : null;
       if (hall) { c.x = hall.x; c.y = hall.ay !== undefined ? hall.ay : hall.y; }
-      else if (c.pop > 0) { let sx = 0, n = 0, sy = 0; for (const p of ppl) if (p.col === c.id) { sx += p.x; sy += p.y; n++; } if (n) { c.x = Math.round(c.x * 0.9 + (sx / n) * 0.1); c.y = Math.round(c.y * 0.9 + (sy / n) * 0.1); } }
-      for (const b of (st.bed || [])) if (b.fac === c.fac && Math.abs(b.x - c.x) < 100) c.beds++;
+      else if (c.pop > 0 && !c.site) { let sx = 0, n = 0, sy = 0; for (const p of ppl) if (p.col === c.id) { sx += p.x; sy += p.y; n++; } if (n) { c.x = Math.round(c.x * 0.9 + (sx / n) * 0.1); c.y = Math.round(c.y * 0.9 + (sy / n) * 0.1); } }
+      for (const b of (st.bed || [])) if (b.fac === c.fac && Math.abs(b.x - c.x) < 100 && ownedBy(b, c)) c.beds++;
     }
   }
 }
 H2.census = census;
+// buildings belong to the settlement that built them (cid); orphaned ones are claimed by whoever is nearest
+function ownedBy(s, c) { if (s.cid === undefined || s.cid === c.id) return true; const o = colById(s.cid); return !o || (o.pop <= 0 && o.fac === c.fac); }
+H2.ownedBy = ownedBy;
 // access point of a station (the ground cell next to it)
 const accY = (s) => (s.ay !== undefined ? s.ay : s.y);
 H2.accY = accY;
 function stationsOf(type, c, maxD) {
   const l = H2.st[type]; if (!l) return [];
-  return l.filter((s) => !s.del && (s.fac === undefined || s.fac === c.fac) && Math.abs(s.x - c.x) < (maxD || 110));
+  return l.filter((s) => !s.del && (s.fac === undefined || s.fac === c.fac) && Math.abs(s.x - c.x) < (maxD || 110) && ownedBy(s, c));
 }
 H2.stationsOf = stationsOf;
 
@@ -131,7 +137,7 @@ function wantedJobs(c) {
   W.farmer = Math.max(1, Math.round(a * 0.3));
   W.woodcutter = Math.max(1, Math.round(a * 0.17));
   W.miner = Math.max(1, Math.round(a * 0.12));
-  W.builder = Math.max(1, Math.round(a * (c.plans.length ? 0.25 : 0.12)));
+  W.builder = Math.max(c.plans.length && a >= 4 ? 2 : 1, Math.round(a * (c.plans.length ? (c.beds < c.pop || !c.hall ? 0.32 : 0.25) : 0.12)));
   const hasOven = stationsOf("oven", c).length > 0, hasForge = stationsOf("forge", c).length > 0, hasHosp = stationsOf("hospital", c).length > 0 || a >= 8;
   W.baker = hasOven ? 1 : 0; W.smith = hasForge ? (a >= 14 ? 2 : 1) : 0; W.doctor = hasHosp && a >= 6 ? 1 : 0;
   W.merchant = stationsOf("market", c).length && a >= 9 ? 1 : 0;
@@ -192,6 +198,7 @@ function colonyThink(c) {
   if (H2.cfg.birth) pregnancyAndBirths(c);
   assignJobs(c);
   if (H2.planBuild) H2.planBuild(c);
+  if (H2.cfg.expand) tryExpand(c);
   if (H2.warThinkColony && H2.cfg.war) H2.warThinkColony(c);
   burials(c);
 }
@@ -208,3 +215,72 @@ function burials(c) {
   for (const r of c.corpses) { const b = H2.byId[r.id]; r.x = b.x; r.y = b.y; }
 }
 H2.pendingBurial = function (c) { return c.corpses.length ? c.corpses[0] : null; };
+
+/* ---- expansion: crowded towns send settlers to found new villages ------------ */
+function facPopOf(f) { return (H2.facPop && H2.facPop[f]) || 0; }
+function frontierSite(c) {
+  let best = null, bs = 1e9;
+  const W = 13;
+  for (let x = W + 2; x < width - W - 2; x += 3) {
+    let near = false;
+    for (const o of H2.cols) { const d = Math.abs(x - o.x); if (d < (o.fac === c.fac ? 64 : 95)) { near = true; break; } }
+    if (near) continue;
+    let ok = true, mn = 1e9, mx = -1e9;
+    for (let i = -W; i <= W; i += 2) {
+      const g = columnGround(x + i); if (g < 6) { ok = false; break; }
+      const t = at(x + i, g + 1); if (!t || elements[t.element].state === "liquid") { ok = false; break; }
+      mn = Math.min(mn, g); mx = Math.max(mx, g);
+    }
+    if (!ok || mx - mn > 8) continue;
+    let sc = Math.abs(x - c.x) + (mx - mn) * 4;
+    for (const o of H2.cols) if (o.fac !== c.fac) sc -= Math.min(60, Math.abs(x - o.x)) * 0.5;   // prefer away from rivals
+    if (sc < bs) { bs = sc; best = { x: x, y: Math.round((mn + mx) / 2) }; }
+  }
+  return best;
+}
+function tryExpand(c) {
+  if (c.site && !c.hall) return;                                   // still being founded itself
+  if (facPopOf(c.fac) >= H2.cfg.maxPerFaction - 6 || H2.people.length >= H2.cfg.maxPeople - 6) return;
+  if (c.war.state !== "peace" && c.war.state !== "wary") return;
+  if (c.adults < 10 || c.famine || c.riot) return;
+  const cap = H2.cfg.townSize || 60;
+  if (!((c.crowded || 0) >= 3 || c.pop >= cap)) return;
+  if (pixelTicks - (c.lastExp || c.founded || 0) < DAY * 3) return;
+  const s = c.stock; if (s.wood < 45 || s.bread + s.grain * 0.5 < 25) return;
+  const site = frontierSite(c);
+  c.lastExp = pixelTicks;
+  if (!site) { if (!c.noRoom) { c.noRoom = true; chronicle(c.name + " is crowded, but there is no free land left to settle.", false, c.fac); } return; }
+  // pick settlers: whole families of ordinary workers
+  const mine = H2.people.filter((p) => p.col === c.id && !p.dead && !p.nomad);
+  const pool = mine.filter((p) => !isChildPx(p) && stageOf(p) === "adult" && !["soldier", "scout", "sentry", "guard", "doctor", "merchant", "smith"].includes(p.job));
+  const want = clamp(Math.round(c.adults * 0.25), 4, 9);
+  const chosen = new Set();
+  pool.sort(() => rnd() - 0.5);
+  for (const p of pool) {
+    if (chosen.size >= want) break;
+    chosen.add(p);
+    if (p.sp) { const sp = H2.byId[p.sp]; if (sp && !sp.dead && sp.col === c.id && !isChildPx(sp)) chosen.add(sp); }
+  }
+  if (chosen.size < 4) return;
+  for (const p of Array.from(chosen)) for (const kid of (p.kids || [])) { const k = H2.byId[kid]; if (k && !k.dead && isChildPx(k) && k.col === c.id) chosen.add(k); }
+  const nc = newColony(c.fac, site.x, site.y);
+  nc.site = { x: site.x, y: site.y }; nc.parent = c.id; nc.mat = null;
+  const give = { wood: 35, stone: 12, iron: 2, grain: 8, bread: 18, coin: 30 };
+  for (const g in give) { const n = Math.min(give[g], Math.floor((s[g] || 0) * 0.4)); s[g] -= n; nc.stock[g] = n; }
+  for (const p of chosen) {
+    p.col = nc.id; p.task = null; p.home = null;
+    for (const b of (H2.st.bed || [])) if (b.owner === p.id) { b.owner = 0; b.ownerName = ""; }
+    if (!isChildPx(p) && p.job !== "laborer") setJob(p, "laborer");
+    setTask(p, "migrate", { x: site.x, y: site.y }, 70);
+    addThought(p, "pioneer", 10, DAY);
+  }
+  chronicle(chosen.size + " settlers leave " + c.name + " to found " + nc.name + ".", true, c.fac);
+  census(true);
+}
+TASKS.migrate = function (p, t) {
+  const r = goTo(p, t.x, t.y, 4, 12);
+  if (r === "arrive") return "done";
+  if (r === "fail") { t.f = (t.f || 0) + 1; if (t.f > 6) return "done"; }
+  if (pixelTicks - t.t0 > DAY * 1.5) return "done";
+};
+H2.tryExpand = tryExpand; H2.frontierSite = frontierSite;

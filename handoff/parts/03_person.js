@@ -97,14 +97,23 @@ function canEnter(x, y, p, soft) {
   if (k === 3) return doorOpenable(p, o);
   return false;
 }
+let SHIFT_DY = 0;
+// is the person heading for somewhere above them (e.g. a bed upstairs)? then stairs are steps, not an archway
+function goingUp(p) { return p.tgy !== undefined && pixelTicks - (p.tgT || 0) < 30 && p.tgy < p.y - 1; }
 function doorOpenable(p, o) {
   if (!p) return false;
+  const e = elements[o.element];
+  if (e && e.stair) return SHIFT_DY === 0 && !goingUp(p);
+  if (e && e.pass) return true;
   if (o.element === "hz_gate") return o.fac === undefined || o.fac === p.fac;
   return o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || H2.truce;
 }
 function put(px, x, y) { let o = pixelMap[x][y]; if (o && isSoft(o)) { deletePixel(x, y); o = null; } if (!o) movePixel(px, x, y); else swapPixels(px, o); }
+const DOOR_KEEP = ["fac", "color", "hp", "ay", "sx", "uf", "cid", "nm", "dc", "dec"];
 function openDoor(o) {
-  H2.doors.push({ x: o.x, y: o.y, el: o.element, fac: o.fac, color: o.color, hp: o.hp, ay: o.ay, t: pixelTicks + 14 });
+  const r = { x: o.x, y: o.y, el: o.element, t: pixelTicks + 14, keep: {} };
+  for (const k of DOOR_KEEP) if (o[k] !== undefined) r.keep[k] = o[k];
+  H2.doors.push(r);
   o.quiet = true;
   deletePixel(o.x, o.y);
 }
@@ -112,6 +121,25 @@ function openDoorsFor(p, tx, ty) {
   const o = inb(tx, ty) ? pixelMap[tx][ty] : null;
   if (o && kindOf(o) === 3 && doorOpenable(p, o)) openDoor(o);
 }
+function canSlipPast(p, ob) {
+  if (ob.sleeping || ob.id === undefined) return ob.dead && !ob.sleeping;
+  if (!(ob.dead || ob.fac === p.fac || ob.fac === undefined || (ob.nomad && !hostileFac(p, ob)))) return false;
+  if (ob.wantDir === Math.sign(ob.x - p.x) && pixelTicks - (ob.wantT || -99) < 14) return false;   // they walk the same way: just follow
+  const busy = pixelTicks - (ob.wantT || -99) > 6 && ob.task && ob.task.k !== "wander";
+  if (busy && p.tgx !== undefined && Math.abs(p.tgx - ob.x) <= 1 && Math.abs((p.tgyy === undefined ? ob.y : p.tgyy) - ob.y) <= 2) return false;   // that's their spot
+  return true;
+}
+function hostileFac(p, q) { return H2.war && H2.war.on && p.fac !== q.fac; }
+// idle people keep a little personal space: step away from a neighbour when there is room
+function spaceOut(p) {
+  if ((pixelTicks + p.id) % 25 !== 0 || p.sleeping) return false;
+  const L = at(p.x - 1, p.y), R = at(p.x + 1, p.y);
+  const pl = L && isPerson(L) && !L.dead, pr = R && isPerson(R) && !R.dead;
+  if (pl === pr) return false;
+  const d = pl ? 1 : -1;
+  return dropOk(p.x + d, p.y) && shift(p, d, 0);
+}
+H2.spaceOut = spaceOut;
 function shift(p, dx, dy, soft) {    // move the whole person (body + head) by dx,dy; returns success. soft: trample grass blades
   const ch = isChildPx(p);
   const h = ch ? null : headOf(p);
@@ -120,20 +148,31 @@ function shift(p, dx, dy, soft) {    // move the whole person (body + head) by d
   const hx = bx, hy = by - 1;
   const ox = p.x, oy = p.y;
   const own = (x, y) => (x === ox && y === oy) || (!ch && x === ox && y === oy - 1);
-  // two friendly people meeting in a corridor swap places instead of blocking each other
-  if (dy === 0 && !ch) {
+  // people never block friends: they slip past each other (swap places), but never take the exact spot
+  // somebody is standing at to work - and nobody is ever pushed out of bed
+  if (dx !== 0 && Math.abs(dy) <= 1 && !ch) {
     const ob = inb(bx, by) ? pixelMap[bx][by] : null;
-    if (ob && ob.element === "hz_body" && !ob.sleeping && (ob.dead || ob.fac === p.fac || ob.fac === undefined) && !(ob.wantDir === dx && pixelTicks - (ob.wantT || -99) < 14)) {
-      const oh = at(bx, by - 1);
-      if (oh && oh.element === "hz_head") { swapPixels(p, ob); swapPixels(h, oh); return true; }
+    if (ob && (ob.element === "hz_body" || ob.element === "hz_child") && canSlipPast(p, ob)) {
+      if (ob.element === "hz_body") {
+        const oh = at(bx, by - 1);
+        if (oh && oh.element === "hz_head") { swapPixels(p, ob); swapPixels(h, oh); return true; }
+      } else {
+        // a child: step over them and let them take our place
+        SHIFT_DY = dy; const okH = own(hx, hy) || canEnter(hx, hy, p, soft); SHIFT_DY = 0;
+        if (okH) { SHIFT_DY = dy; openDoorsFor(p, hx, hy); SHIFT_DY = 0; if (!pixelMap[hx][hy] || own(hx, hy)) { swapPixels(p, ob); put(h, hx, hy); return true; } }
+      }
     }
   }
   // check first, then open doors: never open a door we cannot pass anyway
   const pass = (x, y) => { if (own(x, y)) return true; if (canEnter(x, y, p, soft)) return true; return false; };
-  if (!pass(bx, by)) return false;
-  if (!ch && !pass(hx, hy)) return false;
+  SHIFT_DY = dy;
+  const okB = pass(bx, by), okH = okB && (ch || pass(hx, hy));
+  SHIFT_DY = 0;
+  if (!okB || !okH) return false;
+  SHIFT_DY = dy;
   if (!ch) openDoorsFor(p, hx, hy);
   openDoorsFor(p, bx, by);
+  SHIFT_DY = 0;
   if (ch) { put(p, bx, by); return true; }
   if (dy > 0) { put(p, bx, by); put(h, hx, hy); }
   else { put(h, hx, hy); put(p, bx, by); }
@@ -189,10 +228,28 @@ function clearObstacle(p, dir) {
   }
   return did;
 }
+// two-storey houses: walk to the foot of the stairs first when the target is upstairs, and back to the stairs to come down.
+// Stair blocks and upper-floor planks carry sx (x of the stair foot) and uf (body y on the upper floor).
+function stairRoute(p, tx, ty) {
+  const below = at(p.x, p.y + 1);
+  const tb = at(tx, ty + 1);
+  const tUp = tb && tb.sx !== undefined && tb.uf !== undefined && Math.abs(ty - tb.uf) <= 1 ? tb : null;
+  if (below && below.sx !== undefined && below.uf !== undefined && !isPerson(below)) {
+    if (tUp && tUp.sx === below.sx) return null;                       // the target is on this floor
+    return { x: below.sx, down: true };                                // head back down the stairs first
+  }
+  if (tUp && p.y > ty + 1 && p.x !== tUp.sx) return { x: tUp.sx };      // go to the foot of the stairs
+  return null;
+}
+H2.stairRoute = stairRoute;
 function goTo(p, tx, ty, range, vy) {
   range = range === undefined ? 1 : range; vy = vy === undefined ? 3 : vy;
+  if (Math.abs(tx - p.x) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
+  p.tgx = tx; p.tgyy = ty;
+  const via = stairRoute(p, tx, ty);
+  p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
+  if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
-  if (Math.abs(dxT) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
   let dir = Math.sign(dxT);
   if (p.detour > 0) { dir = p.dd; p.detour--; }
   else if (dir === 0) dir = p.dir || 1;
@@ -254,7 +311,7 @@ function die(p, cause, killer, gone) {
   let msg;
   if (killer && killer.id) {
     killer.kills = (killer.kills || 0) + 1;
-    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
+    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
     if (killer.kills === 8) { killer.title = "Legendary"; chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
     msg = who + " was slain by " + nm(killer) + ".";
     H2.stats.battles++;
@@ -315,7 +372,7 @@ function physics(p) {
   if (!inb(x, y + 1)) { p.fl = 0; return; }
   const below = pixelMap[x][y + 1];
   const kb = below ? kindOf(below) : 0;
-  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && false)) {
+  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
     if (shift(p, 0, 1)) { if (kb === 0) p.fl = (p.fl || 0) + 1; return; }
   }
   if (kb >= 2) {
@@ -512,12 +569,13 @@ function actTick(p) {
 function homeTarget(p) { const c = colById(p.col); return c ? { x: c.x, y: c.y } : { x: p.x, y: p.y }; }
 TASKS.wander = function (p, t) {
   if (!p.wt || p.wt <= 0) {
-    if (rnd() < 0.45) { p.wt = rint(3, 10); p.wd = 0; return; }
+    if (rnd() < 0.45) { p.wt = rint(3, 10); p.wd = 0; spaceOut(p); return; }
     const hm = homeTarget(p);
     p.wd = (Math.abs(p.x - hm.x) > 45 && rnd() < 0.8) ? Math.sign(hm.x - p.x) : (rnd() < 0.5 ? -1 : 1);
     p.wt = rint(6, 28);
   }
   p.wt--;
+  if (!p.wd) spaceOut(p);
   if (p.wd && !tryWalk(p, p.wd, false)) { p.wd = -p.wd; if (rnd() < 0.3) p.wt = 0; }
   if (p.wt <= 0 && p.task && p.task.k === "wander") p.task = null;
 };
@@ -535,7 +593,7 @@ TASKS.flee = function (p, t) {
   if (!tryWalk(p, d, true)) { if (!tryWalk(p, -d, true)) shift(p, 0, -1); }
   if (rnd() < 0.15) t.from = p.x + (rnd() < 0.5 ? -6 : 6);
 };
-TASKS.rest = function (p, t) { if (pixelTicks > t.until) return "done"; };
+TASKS.rest = function (p, t) { if (pixelTicks > t.until) return "done"; spaceOut(p); };
 TASKS.warm = function (p, t) {
   if (pixelTicks > t.until || p.bt > 36.8) return "done";
   const s = H2.nearestOf((H2.st.campfire || []).concat(H2.st.hearth || [], H2.st.forgefire || []), p.x, p.y, 70);
@@ -616,7 +674,7 @@ TASKS.socialize = function (p, t) {
   const s = H2.nearestOf((H2.st.campfire || []).concat(H2.st.market || [], H2.st.hall || []), p.x, p.y, 80);
   if (!s) return TASKS.wander(p, t);
   const r = goTo(p, s.x, accY(s), 3, 4);
-  if (r === "arrive" && H2.chat) H2.chat(p);
+  if (r === "arrive") { if (!spaceOut(p) && H2.chat) H2.chat(p); }
 };
 
 /* ======================================================================

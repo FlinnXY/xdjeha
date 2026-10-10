@@ -165,7 +165,7 @@ TASKS.plant_trees = function (p, t) {
 // stone-like ground that yields stone; everything else dug in a quarry is just spoil
 const STONY = { rock: 1, gravel: 1, basalt: 1, granite: 1, limestone: 1, slate: 1, marble: 1, sandstone: 1, tuff: 1, quartz: 1, rock_wall: 1, packed_sand: 0, iron_ore: 1, ore: 1, raw_iron: 1, cobblestone: 1 };
 const isStony = (o) => !!o && STONY[o.element] === 1 && !o.hzb2;
-const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant");
+const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant" || o.element === "hz_crop" || o.element === "hz_sapling");
 function mineYield(p, o, c) {
   if (!isStony(o)) return;
   p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
@@ -174,25 +174,30 @@ function mineYield(p, o, c) {
   if (rnd() < 0.03 + deep * 0.02) p.inv.powder = (p.inv.powder || 0) + 1;   // saltpetre & sulphur veins
 }
 function exposedRock(p, c) {
-  return H2.findNear(p.x, p.y, 30, (q) => isStony(q) && !isBad(p, q.x, q.y) && (isFree(q.x - 1, q.y) && isFree(q.x - 1, q.y - 1) || isFree(q.x + 1, q.y) && isFree(q.x + 1, q.y - 1)) && !(c && Math.abs(q.x - c.x) < 10 && c.hall));
+  return H2.findNear(p.x, p.y, 30, (q) => isStony(q) && !isBad(p, q.x, q.y) && (isFree(q.x - 1, q.y) && isFree(q.x - 1, q.y - 1) || isFree(q.x + 1, q.y) && isFree(q.x + 1, q.y - 1)) && !(c && Math.abs(q.x - c.x) < 10 && c.hall) && !builtAbove(q.x, q.y));
 }
 // a stepped open-cast quarry outside the village: each column is dug one cell deeper than the last, so it is always walkable
 function planQuarry(c) {
   const order = [];
-  for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) for (let d = 26; d <= 54; d += 4) order.push(c.x + side * d);
-  for (const x0 of order) {
+  for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // always outside the built-up town
+    for (let d = Math.max(16, e); d <= Math.max(54, e + 28); d += 4) order.push(c.x + side * d);
+  }
+  // prefer a long, deep cut; on cramped land settle for a smaller pit
+  for (const L of [20, 13, 8]) for (const x0 of order) {
     const dir = Math.sign(x0 - c.x) || 1;
-    if (x0 < 3 || x0 > width - 4 || x0 + dir * 22 < 3 || x0 + dir * 22 > width - 4) continue;
+    if (x0 < 3 || x0 > width - 4 || x0 + dir * (L + 2) < 3 || x0 + dir * (L + 2) > width - 4) continue;
+    if (!ownTerritory(c, x0) || !ownTerritory(c, x0 + dir * L)) continue;
     const g0 = columnGround(x0); if (g0 < 4) continue;
     let ok = true;
-    for (let j = -1; j <= 22 && ok; j++) {
+    for (let j = -1; j <= L + 2 && ok; j++) {
       const x = x0 + dir * j;
-      for (let y = 0; y < height; y++) { const o = pixelMap[x][y]; if (!o) continue; if (elements[o.element].hzb || elements[o.element].fdn || o.element === "hz_crop" || o.element === "hz_sapling" || isTreePart(o) || elements[o.element].state === "liquid") ok = false; if (!isPerson(o) && !isSoft(o) && kindOf(o) === 2) break; }
+      for (let y = 0; y < height; y++) { const o = pixelMap[x][y]; if (!o) continue; if (elements[o.element].hzb || elements[o.element].fdn || isTreePart(o) || elements[o.element].state === "liquid") ok = false; if (!isPerson(o) && !isSoft(o) && kindOf(o) === 2 && o.element !== "hz_crop" && o.element !== "hz_sapling") break; }
       if (ok && H2.reserved(c, x, g0)) ok = false;
     }
     if (!ok) continue;
     const cells = [];
-    for (let j = 0; j <= 20; j++) {
+    for (let j = 0; j <= L; j++) {
       const x = x0 + dir * j, bottom = Math.min(height - 3, g0 + 1 + Math.min(j, 12));
       const top = columnGround(x) + 1; if (top < 1) continue;
       for (let y = top; y <= bottom; y++) cells.push([x, y]);
@@ -234,6 +239,7 @@ TASKS.mine = function (p, t) {
     if (o && DIGGABLE(o)) break;
     if (o && !isPerson(o) && !DIGGABLE(o) && !o.del) { Q.i = Q.cells.length; return "done"; }   // something built there meanwhile
     if (o && isPerson(o)) return;                                                                 // wait
+    if (o && builtAbove(cell[0], cell[1])) { Q.i++; cell = Q.cells[Q.i]; continue; }             // never undermine a building
     Q.i++; cell = Q.cells[Q.i];
   }
   if (!cell) return "done";
@@ -242,15 +248,26 @@ TASKS.mine = function (p, t) {
   if (r !== "arrive") return;
   t.n = (t.n || 0) + 1;
   const o = at(cell[0], cell[1]); if (!o) { Q.i++; return; }
-  if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) { t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++; }
+  if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) {
+    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++;
+    // remember the open pit so nobody builds on its edge
+    const pits = c.pits || (c.pits = []); const last = Q.pit;
+    if (last) { last[0] = Math.min(last[0], o.x); last[1] = Math.max(last[1], o.x); } else { Q.pit = [o.x, o.x]; pits.push(Q.pit); }
+  }
 };
+function builtAbove(x, y) {
+  for (let xx = x - 1; xx <= x + 1; xx++) for (let yy = y - 1; yy >= Math.max(0, y - 14); yy--) { const o = at(xx, yy); if (o && !isPerson(o) && (elements[o.element].hzb || elements[o.element].fdn)) return true; }
+  return false;
+}
 function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 
 /* ---- farming -------------------------------------------------------------- */
 const SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, farmland: 1 };
 function farmSpot(p, c) {
   for (let tries = 0; tries < 12; tries++) {
-    const x = clamp(c.x + rint(-32, 32), 2, width - 3);
+    // fields lie around the town, not in it: between the edge of the built-up area and 30 cells beyond
+    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3 : 9;
+    const x = clamp(c.x + side * rint(e, e + 30), 2, width - 3);
     const gy = groundY(x, clamp(c.y - 10, 0, height - 2), 24);
     if (gy < 1) continue;
     const b = at(x, gy + 1); if (!b || !SOIL[b.element]) continue;
@@ -542,7 +559,7 @@ TASKS.pickpocket = function (p, t) {
 
 /* ---- beds ------------------------------------------------------------------ */
 H2.claimBed = function (p, c) {
-  const beds = (H2.st.bed || []).filter((b) => !b.del && b.fac === p.fac && Math.abs(b.x - c.x) < 110 && (!b.owner || !H2.byId[b.owner] || H2.byId[b.owner].dead));
+  const beds = (H2.st.bed || []).filter((b) => !b.del && b.fac === p.fac && Math.abs(b.x - c.x) < 110 && ownedBy(b, c) && (!b.owner || !H2.byId[b.owner] || H2.byId[b.owner].dead));
   if (!beds.length) return null;
   let anchor = null;
   if (p.sp) { const s = H2.byId[p.sp]; if (s && s.home) anchor = s.home; }
