@@ -26,6 +26,9 @@ def("hz_door", { color: ["#6b4a2b","#5e4025"], behavior: behaviors.WALL, density
   burn: 20, burnTime: 200, burnInto: "ash", breakInto: ifEl("sawdust","ash"), bhp: 12, hzb: true, door: true, forceSaveColor: true });
 def("hz_gate", { color: ["#4a3a2a","#54402d"], behavior: behaviors.WALL, density: 1200, hardness: 0.45,
   burn: 8, burnTime: 300, burnInto: "ash", bhp: 28, hzb: true, door: true, forceSaveColor: true });
+// packed earth: building foundations and levelled door approaches (does not crumble like dirt, grass cannot grow on it)
+def("hz_earth", { color: ["#7a5a3a","#6f5234","#836141"], behavior: behaviors.WALL, density: 1600, hardness: 0.3, fdn: true, hidden: true,
+  breakInto: "dirt", tempHigh: 1200, stateHigh: ifEl("magma","dirt"), desc: "Packed earth laid as a foundation by villagers." });
 def("hz_palisade", { color: ["#8a6a3f","#7c5e37","#94744a"], behavior: behaviors.WALL, density: 650, hardness: 0.3,
   burn: 25, burnTime: 250, burnInto: "ash", breakInto: ifEl("sawdust","ash"), bhp: 20, hzb: true });
 
@@ -92,6 +95,35 @@ def("hz_crop", { color: "#5cae3a", density: 300, hardness: 0.02, burn: 60, burnT
       if (pixelTicks % 20 === 0) p.color = p.g < 0.35 ? "#6dbb43" : p.g < 0.7 ? "#9bc13a" : p.g < 1 ? "#d3b83a" : "#e6bf3c";
     }
   } });
+
+// ---- forestry: villagers plant saplings that grow into modest trees made of ordinary wood + leaves
+const TREE_SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, clay_soil: 1, mycelium: 1 };
+def("hz_sapling", { color: ["#3f8f2a","#4a9e33"], behavior: behaviors.WALL, density: 300, hardness: 0.02, burn: 60, burnTime: 60, burnInto: "ash", bhp: 2,
+  forceSaveColor: true, properties: { g: 0 }, desc: "A young tree planted by a woodcutter. Grows into a small tree.",
+  hoverStat: (p) => "growing " + Math.floor((p.g || 0) * 100) + "%",
+  tick: (p) => {
+    doBurning(p); if (p.del) return;
+    const b = at(p.x, p.y + 1);
+    if (!b) { tryMove(p, p.x, p.y + 1); return; }
+    if (!TREE_SOIL[b.element]) { if (rnd() < 0.002) deletePixel(p.x, p.y); return; }
+    if (pixelTicks % 10 !== 0) return;
+    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.0006 : 0.0035);
+    if (p.g < 1) return;
+    growTree(p);
+  } });
+function growTree(p) {
+  const x = p.x, y = p.y, H = 4 + (x * 7 + y) % 3;
+  for (let k = 0; k <= H + 2; k++) if (!inb(x, y - k) || (k > 0 && pixelMap[x][y - k])) { p.g = 0.9; return false; }   // no room yet
+  changePixel(p, "wood", false);
+  for (let k = 1; k <= H; k++) createPixel("wood", x, y - k);
+  const top = y - H;
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 0; dy++) {
+    if (Math.abs(dx) + Math.abs(dy) > 2 || (!dx && !dy)) continue;
+    const xx = x + dx, yy = top + dy; if (inb(xx, yy) && !pixelMap[xx][yy]) createPixel("plant", xx, yy);
+  }
+  if (inb(x, top - 1) && !pixelMap[x][top - 1]) createPixel("plant", x, top - 1);
+  return true;
+}
 
 // ---- projectiles
 def("hz_arrow", { color: "#6b5436", behavior: behaviors.WALL, density: 300, hardness: 0, bhp: 1, hidden: true, forceSaveColor: true,

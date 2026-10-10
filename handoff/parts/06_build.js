@@ -7,9 +7,9 @@ const COST = {
   hz_stone: { stone: 1 }, hz_bed: { wood: 2 }, hz_cot: { wood: 2 }, hz_hearth: { stone: 2 }, hz_campfire: { wood: 2 }, hz_stall: { wood: 1 },
   hz_banner: { wood: 1 }, hz_anvil: { iron: 3 }, hz_forgefire: { stone: 2 }, hz_oven: { stone: 3 }, hz_rack: { wood: 2, iron: 1 }, hz_dummy: { wood: 2 },
   hz_post: { wood: 1 }, hz_medcross: { wood: 1 }, hz_scarecrow: { wood: 1 }, hz_mill: { wood: 3 }, hz_chest: { wood: 2 }, hz_cannon: { cannon: 1 }, hz_well: {},
-  glass: {}, dirt: {}, water: {},
+  glass: {}, dirt: {}, water: {}, hz_earth: {},
 };
-const GROUNDISH = { dirt: 1, grass: 1, soil: 1, mud: 1, sand: 1, rock: 1, gravel: 1, clay: 1, clay_soil: 1, snow: 1, packed_snow: 1, permafrost: 1, sandstone: 1, limestone: 1, basalt: 1, granite: 1, packed_sand: 1, farmland: 1 };
+const GROUNDISH = { hz_earth: 1, dirt: 1, grass: 1, soil: 1, mud: 1, sand: 1, rock: 1, gravel: 1, clay: 1, clay_soil: 1, snow: 1, packed_snow: 1, permafrost: 1, sandstone: 1, limestone: 1, basalt: 1, granite: 1, packed_sand: 1, farmland: 1 };
 function groundish(o) { if (!o || isPerson(o)) return false; const e = elements[o.element]; return !!(GROUNDISH[o.element] || (e && e.category === "land" && !e.hzb && e.state !== "liquid" && o.element !== "wood" && o.element !== "plant")); }
 
 /* tiny blueprint DSL ------------------------------------------------------- */
@@ -54,7 +54,12 @@ function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0)
 /* ---- site finding ---------------------------------------------------------- */
 function columnGround(x) { // y of free cell above the topmost solid thing, only if that is real ground
   if (x < 1 || x >= width - 1) return -1;
-  for (let y = 0; y < height - 1; y++) { const o = pixelMap[x][y]; if (o) return groundish(o) ? y - 1 : -1; }
+  for (let y = 0; y < height - 1; y++) {
+    const o = pixelMap[x][y]; if (!o || isPerson(o)) continue;
+    if (isSoft(o) && (o.element !== "grass" || o.h > 0 || isSoft(pixelMap[x][y + 1]))) continue;  // grass blades / flowers are not ground
+    if (elements[o.element] && elements[o.element].state === "gas") continue;
+    return groundish(o) ? y - 1 : -1;
+  }
   return -1;
 }
 function overlaps(c, x0, x1, margin) { for (const pl of c.plans) if (x1 + margin >= pl.x0 && x0 - margin <= pl.x1) return true; return false; }
@@ -78,7 +83,7 @@ function findSite(c, w, opt) {
       for (const mxx of [x0 - 1, x0 - 2, x0 + w, x0 + w + 1]) { if (mxx < 1 || mxx >= width - 1) continue; for (let y = 0; y < height; y++) { const o = pixelMap[mxx][y]; if (o) { if (elements[o.element].hzb) bad = true; break; } } if (bad) break; }
       if (bad) continue;
     }
-    return { x0: x0, y0: mn, gys: gys };
+    return { x0: x0, y0: mn, gys: gys, ag: [columnGround(x0 - 1), columnGround(x0 + w)] };
   }
   return null;
 }
@@ -91,11 +96,24 @@ function queuePlan(c, type, opt) {
   const site = opt.site || findSite(c, bp.w, opt);
   if (!site) return null;
   const cells = [];
-  // foundation for uneven ground
-  if (site.gys && !bp.dug) for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= site.gys[i]; y++) cells.push([i, y - site.y0, "dirt"]);
+  // foundation for uneven ground (packed earth, so it neither crumbles nor grows grass inside the house)
+  if (site.gys && !bp.dug) {
+    const floor = bp.w >= 3;
+    for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= Math.max(site.gys[i], floor ? site.y0 + 1 : site.y0); y++) cells.push([i, y - site.y0, "hz_earth"]);
+    // level the ground right outside both ends so people can walk straight in and out of the doors
+    if (floor && site.ag && !opt.nomargin) {
+      [[-1, site.ag[0]], [bp.w, site.ag[1]]].forEach(([ax, g]) => {
+        if (g < 1 || g - site.y0 > 4 || site.y0 - g > 6) return;
+        for (let y = g + 1; y <= site.y0; y++) cells.push([ax, y - site.y0, "__dig"]);
+        for (let y = site.y0 + 1; y <= Math.max(site.y0 + 1, g); y++) cells.push([ax, y - site.y0, "hz_earth"]);
+      });
+      // clear the head room above the approach as well (plants, loose earth)
+      for (const ax of [-1, bp.w]) for (let dy = -2; dy <= 0; dy++) cells.push([ax, dy, "__dig"]);
+    }
+  }
   for (const cell of bp.cells) cells.push(cell.slice());
   if (opt.mirror) for (const cell of cells) { cell[0] = bp.w - 1 - cell[0]; }
-  cells.sort((a, b) => (a[3] && a[3].late ? 1 : 0) - (b[3] && b[3].late ? 1 : 0) || (a[2] === "water" ? 1 : 0) - (b[2] === "water" ? 1 : 0) || b[1] - a[1] || a[0] - b[0]);
+  cells.sort((a, b) => (a[3] && a[3].late ? 1 : 0) - (b[3] && b[3].late ? 1 : 0) || (a[2] === "water" ? 1 : 0) - (b[2] === "water" ? 1 : 0) || (b[2] === "__dig" ? 1 : 0) - (a[2] === "__dig" ? 1 : 0) || b[1] - a[1] || a[0] - b[0]);
   const plan = { id: c.plans.length + 1000 + Math.floor(rnd() * 1e6), type: type, x0: site.x0, y0: site.y0, x1: site.x0 + bp.w - 1, w: bp.w, cells: cells, i: 0, state: "ready", t0: pixelTicks, opt: opt, cost: cost, dir: opt.dir };
   c.plans.push(plan);
   return plan;
@@ -173,8 +191,16 @@ TASKS.build = function (p, t) {
   if (el === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb && elements[o.element].state !== "liquid") deletePixel(cx, cy); pl.i++; return; }
   if (o && o.element === el) { pl.i++; return; }
   if (o) {
-    if (isPerson(o)) { t.wait = (t.wait || 0) + 1; if (t.wait > 25) { pl.i++; t.wait = 0; } return; }
-    const oi = elements[o.element];
+    if (isPerson(o)) {
+      // somebody is standing where a block goes: lift them on top of it (foundations) or wait for them to move on
+      const b = o.element === "hz_head" ? at(o.x, o.y + 1) : o;
+      if (el === "hz_earth" && b && b.id !== undefined && !b.dead) { shift(b, 0, -1) || shift(b, 0, -1, true); if (isPerson(pixelMap[cx][cy])) shift(b, 0, -1); }
+      if (isPerson(pixelMap[cx][cy])) { t.wait = (t.wait || 0) + 1; if (t.wait > 60) { pl.i++; t.wait = 0; } return; }
+    }
+  }
+  const o2 = pixelMap[cx][cy];
+  if (o2) {
+    const oi = elements[o2.element];
     if (oi.hzb && !(el === "water")) { pl.i++; return; }                                   // someone else's wall
     if (el === "water" && oi.state === "liquid") { pl.i++; return; }
     deletePixel(cx, cy);                                                                      // clear brush, leaves, loose stuff

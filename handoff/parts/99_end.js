@@ -8,7 +8,7 @@ function doorsTick() {
     const r = d[i];
     if (pixelTicks < r.t) continue;
     if (!inb(r.x, r.y)) { d.splice(i, 1); continue; }
-    if (!pixelMap[r.x][r.y]) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.fac = r.fac; if (r.color) n.color = r.color; if (r.hp !== undefined) n.hp = r.hp; } d.splice(i, 1); }
+    if (!pixelMap[r.x][r.y]) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.fac = r.fac; n.hzb2 = 1; if (r.ay !== undefined) n.ay = r.ay; if (r.color) n.color = r.color; if (r.hp !== undefined) n.hp = r.hp; } d.splice(i, 1); }
     else { r.t = pixelTicks + 8; r.w = (r.w || 0) + 1; if (r.w > 60) d.splice(i, 1); }
   }
 }

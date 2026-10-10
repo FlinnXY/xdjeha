@@ -24,8 +24,9 @@ function laborerPick(p, c) {
 function jobThink(p, c) {
   if (!c) return false;
   if (p.jail && pixelTicks < p.jail) { setTask(p, "stocks", {}, 90); return true; }
-  // deliver full loads
-  if (carrying(p) >= CARRY_MAX) { setTask(p, "deposit", { work: true }, 22); return true; }
+  // deliver full loads, and partial loads when the village is waiting for materials or at the end of the day
+  const load = carrying(p);
+  if (load >= CARRY_MAX || (load > 0 && (c.plans.some((q) => q.state === "stalled") || isEvening() || pixelTicks - (p.lastDep || 0) > DAY * 0.6))) { setTask(p, "deposit", { work: true }, 22); return true; }
   // someone has to bury the dead
   if (c.corpses.length && p.job !== "soldier" && p.job !== "scout" && !isChildPx(p)) {
     const cur = c.burier ? H2.byId[c.burier] : null;
@@ -61,7 +62,7 @@ TASKS.deposit = function (p, t) {
   const r = goTo(p, tgt.x, ty, 2, 4);
   if (r === "fail") return "done";
   if (r !== "arrive") return;
-  let wage = 0;
+  let wage = 0; p.lastDep = pixelTicks;
   for (const k of GOODS) {
     const n = p.inv[k] || 0; if (!n) continue;
     c.stock[k] = (c.stock[k] || 0) + n; p.inv[k] = 0;
@@ -89,14 +90,19 @@ function treeBase(o) { // walk down to the lowest wood pixel; returns it if the 
 }
 TASKS.chop = function (p, t) {
   if ((p.inv.wood || 0) >= CARRY_MAX) return "done";
+  const c = colById(p.col);
   if (!t.base || t.base.del || !isTreePart(t.base)) {
-    const tp = (q) => isTreePart(q) && treeBase(q);
+    const tp = (q) => { if (!isTreePart(q)) return false; const b = treeBase(q); return !!b && !isBad(p, b.x, b.y) && !(c && Math.abs(b.x - c.x) < 8 && c.hall); };
     const o = H2.findNear(p.x, p.y, 38, tp) || H2.findNear(p.x, p.y, 90, tp, 2);
     t.base = o ? treeBase(o) : null; t.n = 0;
-    if (!t.base) { t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noTrees = pixelTicks; return "fail"; } return TASKS.wander(p, t); }
+    if (!t.base) {
+      // no trees left nearby: plant a grove instead (woodcutters keep the forest alive)
+      if (c && !t.planted) { const pri = t.pri || 10; p.task = null; setTask(p, "plant_trees", { work: true, n: 0 }, pri); return; }
+      t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noTrees = pixelTicks; return "fail"; } return TASKS.wander(p, t);
+    }
   }
   const r = goTo(p, t.base.x, t.base.y, 1, 3);
-  if (r === "fail") { t.base = null; return; }
+  if (r === "fail") { markBad(p, t.base.x, t.base.y, 3000); t.base = null; return; }
   if (r === "arrive") {
     t.n++;
     if (t.n % 4 === 0 && rnd() < 0.5) p.dir = -p.dir;
@@ -113,7 +119,7 @@ function fellTree(p, base) {
       if (!dx && !dy) continue;
       const n = at(o.x + dx, o.y + dy); if (!n || n.del) continue;
       const key = n.x + "," + n.y; if (seen[key]) continue;
-      if (n.element === "wood" || n.element === "tree_branch" || (n.element === "plant" && (o.element !== "plant" || cnt < 100))) { seen[key] = true; q.push(n); }
+      if (n.element === "wood" || n.element === "tree_branch" || (n.element === "plant" && (o.element !== "plant" || cnt < 100))) { if (n.hzb2 || elements[n.element].hzb) continue; seen[key] = true; q.push(n); }
     }
   }
   const bx = base.x, by = base.y;
@@ -121,37 +127,122 @@ function fellTree(p, base) {
   const yield_ = clamp(Math.ceil(wood / 2) + 1, 2, 9);
   p.inv.wood = (p.inv.wood || 0) + yield_;
   p.sk.wood++;
-  // replant only now and then, and never right inside the village (saplings grow into huge trees in Sandboxels)
+  // replant a managed sapling (never right inside the village)
   const pc = colById(p.col);
-  if (inb(bx, by) && !pixelMap[bx][by] && elements.sapling && pc && Math.abs(bx - pc.x) > 28 && rnd() < 0.2 && (H2.cfg.replant !== false)) createPixel("sapling", bx, by);
+  if (H2.cfg.replant !== false && pc && Math.abs(bx - pc.x) > 16 && inb(bx, by) && !pixelMap[bx][by] && rnd() < 0.7) { createPixel("hz_sapling", bx, by); }
 }
+// grove management: plant saplings on free soil outside the village
+function groveSpot(p, c) {
+  const side0 = c.groveSide || (c.groveSide = (c.x < width / 2 ? -1 : 1) * (rnd() < 0.7 ? 1 : -1));
+  for (let tries = 0; tries < 16; tries++) {
+    const side = tries < 10 ? side0 : -side0;
+    const x = clamp(Math.round(c.x + side * rint(20, 48)), 2, width - 3);
+    if (isBad(p, x, 0)) continue;
+    const gy = groundY(x, clamp(c.y - 14, 0, height - 2), 30);
+    if (gy < 8) continue;
+    const b = at(x, gy + 1); if (!b || !TREE_SOIL[b.element]) continue;
+    let ok = true;
+    for (let dx = -3; dx <= 3 && ok; dx++) for (let dy = -8; dy <= 0; dy++) { const o = at(x + dx, gy + dy); if (o && (elements[o.element].hzb || isTreePart(o) || o.element === "hz_sapling" || o.element === "hz_crop")) { ok = false; break; } }
+    if (!ok || (H2.reserved && H2.reserved(c, x, gy))) continue;
+    if (c.quarry && Math.abs(x - c.quarry.x0) < 18) continue;
+    return { x: x, y: gy };
+  }
+  return null;
+}
+TASKS.plant_trees = function (p, t) {
+  const c = colById(p.col); if (!c) return "done";
+  if (!t.spot) { t.spot = groveSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 5) return "done"; return TASKS.wander(p, t); } }
+  const r = goTo(p, t.spot.x, t.spot.y, 1, 3);
+  if (r === "fail") { markBad(p, t.spot.x, 0, 4000); t.spot = null; return; }
+  if (r === "arrive") {
+    if (!pixelMap[t.spot.x][t.spot.y]) createPixel("hz_sapling", t.spot.x, t.spot.y);
+    t.spot = null; t.n = (t.n || 0) + 1; p.sk.wood += 0.2;
+    if (t.n >= 3) return "done";
+  }
+};
 
 /* ---- mining -------------------------------------------------------------- */
+// stone-like ground that yields stone; everything else dug in a quarry is just spoil
+const STONY = { rock: 1, gravel: 1, basalt: 1, granite: 1, limestone: 1, slate: 1, marble: 1, sandstone: 1, tuff: 1, quartz: 1, rock_wall: 1, packed_sand: 0, iron_ore: 1, ore: 1, raw_iron: 1, cobblestone: 1 };
+const isStony = (o) => !!o && STONY[o.element] === 1 && !o.hzb2;
+const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant");
+function mineYield(p, o, c) {
+  if (!isStony(o)) return;
+  p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
+  const deep = clamp((o.y - (c ? c.y : o.y)) / 10, 0, 1);
+  if (rnd() < 0.08 + deep * 0.12 || o.element === "iron_ore" || o.element === "raw_iron") p.inv.iron = (p.inv.iron || 0) + 1;
+  if (rnd() < 0.03 + deep * 0.02) p.inv.powder = (p.inv.powder || 0) + 1;   // saltpetre & sulphur veins
+}
+function exposedRock(p, c) {
+  return H2.findNear(p.x, p.y, 30, (q) => isStony(q) && !isBad(p, q.x, q.y) && (isFree(q.x - 1, q.y) && isFree(q.x - 1, q.y - 1) || isFree(q.x + 1, q.y) && isFree(q.x + 1, q.y - 1)) && !(c && Math.abs(q.x - c.x) < 10 && c.hall));
+}
+// a stepped open-cast quarry outside the village: each column is dug one cell deeper than the last, so it is always walkable
+function planQuarry(c) {
+  const order = [];
+  for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) for (let d = 26; d <= 54; d += 4) order.push(c.x + side * d);
+  for (const x0 of order) {
+    const dir = Math.sign(x0 - c.x) || 1;
+    if (x0 < 3 || x0 > width - 4 || x0 + dir * 22 < 3 || x0 + dir * 22 > width - 4) continue;
+    const g0 = columnGround(x0); if (g0 < 4) continue;
+    let ok = true;
+    for (let j = -1; j <= 22 && ok; j++) {
+      const x = x0 + dir * j;
+      for (let y = 0; y < height; y++) { const o = pixelMap[x][y]; if (!o) continue; if (elements[o.element].hzb || elements[o.element].fdn || o.element === "hz_crop" || o.element === "hz_sapling" || isTreePart(o) || elements[o.element].state === "liquid") ok = false; if (!isPerson(o) && !isSoft(o) && kindOf(o) === 2) break; }
+      if (ok && H2.reserved(c, x, g0)) ok = false;
+    }
+    if (!ok) continue;
+    const cells = [];
+    for (let j = 0; j <= 20; j++) {
+      const x = x0 + dir * j, bottom = Math.min(height - 3, g0 + 1 + Math.min(j, 12));
+      const top = columnGround(x) + 1; if (top < 1) continue;
+      for (let y = top; y <= bottom; y++) cells.push([x, y]);
+    }
+    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0 };
+    return c.quarry;
+  }
+  return null;
+}
 TASKS.mine = function (p, t) {
   if (carrying(p) >= CARRY_MAX) return "done";
-  const c = colById(p.col);
-  if (!t.rock || t.rock.del || (t.rock.element !== "rock" && t.rock.element !== "gravel")) {
-    const o = H2.findNear(p.x, p.y, 30, (q) => (q.element === "rock") && !elements[q.element].hzb && (!isFree(q.x - 1, q.y) ? !isFree(q.x + 1, q.y) ? !isFree(q.x, q.y - 1) ? false : true : true : true));
-    t.rock = o; t.n = 0;
-    if (!t.rock) { t.none = (t.none || 0) + 1; if (t.none > 8) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); }
+  const c = colById(p.col); if (!c) return "done";
+  // 1. loose rock lying open at the surface
+  if (!t.q && (!t.rock || t.rock.del || !isStony(t.rock))) {
+    t.rock = exposedRock(p, c); t.n = 0;
+    if (!t.rock) t.q = true;
   }
-  // stand beside the rock on its open side
-  const side = isFree(t.rock.x - 1, t.rock.y) ? -1 : isFree(t.rock.x + 1, t.rock.y) ? 1 : 0;
-  const tx = side ? t.rock.x + side : t.rock.x, ty = t.rock.y;
-  const r = goTo(p, tx, ty, 0, 1);
-  if (r === "fail") { t.rock = null; return; }
-  if (r === "arrive") {
-    t.n++;
-    if (t.n >= 9 - Math.min(4, Math.floor(p.sk.mine / 8))) {
-      const rx = t.rock.x, ry = t.rock.y;
-      deletePixel(rx, ry);
-      p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
-      const deep = clamp((ry - (c ? c.y : ry)) / 10, 0, 1);
-      if (rnd() < 0.07 + deep * 0.1) { p.inv.iron = (p.inv.iron || 0) + 1; }
-      if (rnd() < 0.025) { p.inv.powder = (p.inv.powder || 0) + 1; }
-      t.rock = null;
+  if (!t.q) {
+    const side = isFree(t.rock.x - 1, t.rock.y) ? -1 : isFree(t.rock.x + 1, t.rock.y) ? 1 : 0;
+    const tx = side ? t.rock.x + side : t.rock.x, ty = t.rock.y;
+    const r = goTo(p, tx, ty, 0, 2);
+    if (r === "fail") { markBad(p, t.rock.x, t.rock.y, 3000); t.rock = null; return; }
+    if (r === "arrive") {
+      t.n++;
+      if (t.n >= 9 - Math.min(4, Math.floor(p.sk.mine / 8))) { const o = t.rock; deletePixel(o.x, o.y); mineYield(p, o, c); t.rock = null; t.q = false; }
     }
+    return;
   }
+  // 2. the quarry
+  let Q = c.quarry;
+  if (!Q || Q.i >= Q.cells.length) { Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
+  let cell = Q.cells[Q.i];
+  // skip cells that are already empty or must not be dug (water next to it would flood the pit)
+  let guard = 0;
+  while (cell && guard++ < 40) {
+    const o = at(cell[0], cell[1]);
+    const wet = [[1, 0], [-1, 0], [0, -1]].some((d) => { const n = at(cell[0] + d[0], cell[1] + d[1]); return n && elements[n.element] && elements[n.element].state === "liquid"; });
+    if (wet) { Q.i = Q.cells.length; return "done"; }
+    if (o && DIGGABLE(o)) break;
+    if (o && !isPerson(o) && !DIGGABLE(o) && !o.del) { Q.i = Q.cells.length; return "done"; }   // something built there meanwhile
+    if (o && isPerson(o)) return;                                                                 // wait
+    Q.i++; cell = Q.cells[Q.i];
+  }
+  if (!cell) return "done";
+  const r = goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
+  if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }
+  if (r !== "arrive") return;
+  t.n = (t.n || 0) + 1;
+  const o = at(cell[0], cell[1]); if (!o) { Q.i++; return; }
+  if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) { t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++; }
 };
 function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 
@@ -179,13 +270,13 @@ TASKS.farm = function (p, t) {
     t.crop = null;
     const list = H2.crops || [];
     let best = null, bd = 60;
-    for (const q of list) { if (q.del || q.g < 1) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y) * 0.5; if (d < bd) { bd = d; best = q; } }
+    for (const q of list) { if (q.del || q.g < 1 || isBad(p, q.x, q.y)) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y) * 0.5; if (d < bd) { bd = d; best = q; } }
     if (!best) best = H2.findNear(p.x, p.y, 15, (q) => q.element === "wheat");
     t.crop = best;
   }
   if (t.crop) {
     const r = goTo(p, t.crop.x, t.crop.y, 1, 3);
-    if (r === "fail") { t.crop = null; return; }
+    if (r === "fail") { markBad(p, t.crop.x, t.crop.y); t.crop = null; return; }
     if (r === "arrive") {
       const cx = t.crop.x, cy = t.crop.y, wasCrop = t.crop.element === "hz_crop";
       deletePixel(cx, cy); t.crop = null;
@@ -199,7 +290,7 @@ TASKS.farm = function (p, t) {
   if ((H2.crops || []).filter((q) => !q.del && Math.abs(q.x - c.x) < 60).length < want) {
     if (!t.spot) { t.spot = farmSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 6) return "fail"; return TASKS.wander(p, t); } }
     const r = goTo(p, t.spot.x, t.spot.y, 1, 3);
-    if (r === "fail") { t.spot = null; return; }
+    if (r === "fail") { markBad(p, t.spot.x, t.spot.y); t.spot = null; return; }
     if (r === "arrive") { if (!pixelMap[t.spot.x][t.spot.y]) createPixel("hz_crop", t.spot.x, t.spot.y); t.spot = null; p.sk.farm += 0.2; }
     return;
   }

@@ -87,10 +87,11 @@ function growUp(p) {
 }
 
 /* ---- movement ---------------------------------------------------------- */
-function canEnter(x, y, p) {
+function canEnter(x, y, p, soft) {
   if (!inb(x, y)) return false;
   const o = pixelMap[x][y];
   if (!o) return true;
+  if (soft && isSoft(o)) return true;
   const k = kindOf(o);
   if (k === 1) return true;
   if (k === 3) return doorOpenable(p, o);
@@ -99,26 +100,26 @@ function canEnter(x, y, p) {
 function doorOpenable(p, o) {
   if (!p) return false;
   if (o.element === "hz_gate") return o.fac === undefined || o.fac === p.fac;
-  return o.fac === undefined || o.fac === p.fac || p.job === "merchant" || H2.truce;
+  return o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || H2.truce;
 }
-function put(px, x, y) { const o = pixelMap[x][y]; if (!o) movePixel(px, x, y); else swapPixels(px, o); }
+function put(px, x, y) { let o = pixelMap[x][y]; if (o && isSoft(o)) { deletePixel(x, y); o = null; } if (!o) movePixel(px, x, y); else swapPixels(px, o); }
 function openDoor(o) {
-  H2.doors.push({ x: o.x, y: o.y, el: o.element, fac: o.fac, color: o.color, hp: o.hp, t: pixelTicks + 14 });
+  H2.doors.push({ x: o.x, y: o.y, el: o.element, fac: o.fac, color: o.color, hp: o.hp, ay: o.ay, t: pixelTicks + 14 });
+  o.quiet = true;
   deletePixel(o.x, o.y);
 }
 function openDoorsFor(p, tx, ty) {
   const o = inb(tx, ty) ? pixelMap[tx][ty] : null;
   if (o && kindOf(o) === 3 && doorOpenable(p, o)) openDoor(o);
 }
-function shift(p, dx, dy) {          // move the whole person (body + head) by dx,dy; returns success
+function shift(p, dx, dy, soft) {    // move the whole person (body + head) by dx,dy; returns success. soft: trample grass blades
   const ch = isChildPx(p);
   const h = ch ? null : headOf(p);
   if (!ch && !h) return false;
   const bx = p.x + dx, by = p.y + dy;
   const hx = bx, hy = by - 1;
   const ox = p.x, oy = p.y;
-  if (!ch) { openDoorsFor(p, hx, hy); }
-  openDoorsFor(p, bx, by);
+  const own = (x, y) => (x === ox && y === oy) || (!ch && x === ox && y === oy - 1);
   // two friendly people meeting in a corridor swap places instead of blocking each other
   if (dy === 0 && !ch) {
     const ob = inb(bx, by) ? pixelMap[bx][by] : null;
@@ -127,9 +128,12 @@ function shift(p, dx, dy) {          // move the whole person (body + head) by d
       if (oh && oh.element === "hz_head") { swapPixels(p, ob); swapPixels(h, oh); return true; }
     }
   }
-  const own = (x, y) => (x === ox && y === oy) || (!ch && x === ox && y === oy - 1);
-  if (!own(bx, by) && !canEnter(bx, by, p)) return false;
-  if (!ch && !own(hx, hy) && !canEnter(hx, hy, p)) return false;
+  // check first, then open doors: never open a door we cannot pass anyway
+  const pass = (x, y) => { if (own(x, y)) return true; if (canEnter(x, y, p, soft)) return true; return false; };
+  if (!pass(bx, by)) return false;
+  if (!ch && !pass(hx, hy)) return false;
+  if (!ch) openDoorsFor(p, hx, hy);
+  openDoorsFor(p, bx, by);
   if (ch) { put(p, bx, by); return true; }
   if (dy > 0) { put(p, bx, by); put(h, hx, hy); }
   else { put(h, hx, hy); put(p, bx, by); }
@@ -148,20 +152,37 @@ function tryWalk(p, dx, reckless) {
   if (!dx) return false;
   if (!reckless && !(p.panic > 0) && !dropOk(p.x + dx, p.y) && !(p.fall)) {
     // could also be a one-step up; check that first
-    if (!shift(p, dx, -1)) return false;
+    if (!shift(p, dx, -1) && !shift(p, dx, -1, true)) return false;
     p.dir = dx; return true;
   }
-  if (shift(p, dx, 0)) { p.dir = dx; return true; }
-  if (shift(p, dx, -1)) { p.dir = dx; return true; }
+  if (shift(p, dx, 0) || shift(p, dx, -1) || shift(p, dx, 0, true) || shift(p, dx, -1, true)) { p.dir = dx; return true; }
+  if (climb(p, dx)) { p.dir = dx; return true; }
   return false;
 }
+// scramble up a ledge two cells high (slowly). Needs head room above the person and free space on the ledge.
+function climb(p, dx) {
+  if (isChildPx(p) || p.leg || (p.climbT && pixelTicks < p.climbT)) return false;
+  const x = p.x, y = p.y;
+  if (!inb(x, y - 3) || !canEnter(x, y - 2, p, true)) return false;
+  const front = at(x + dx, y), front2 = at(x + dx, y - 1);
+  if (!front || !front2 || kindOf(front) < 2 || kindOf(front2) < 2) return false;          // only a real ledge
+  if (!canEnter(x + dx, y - 2, p, true) || !canEnter(x + dx, y - 3, p, true)) return false;
+  if (!shift(p, 0, -1, true)) return false;
+  if (!shift(p, dx, -1, true)) { shift(p, 0, 1); return false; }
+  p.climbT = pixelTicks + 9; p.fl = 0;
+  return true;
+}
+// short memory of unreachable targets so the AI picks a different well / tree / bed next time
+function markBad(p, x, y, dur) { if (!p.bad) p.bad = {}; p.bad[x + "," + y] = pixelTicks + (dur || 1500); }
+function isBad(p, x, y) { if (!p.bad) return false; const k = x + "," + y, e = p.bad[k]; if (!e) return false; if (e < pixelTicks) { delete p.bad[k]; return false; } return true; }
+H2.markBad = markBad; H2.isBad = isBad;
 H2.tryWalk = tryWalk;
 // villagers clear natural obstacles (trees, rock ledges, earth walls) that stand in their way — never player or village structures
 function clearObstacle(p, dir) {
   let did = false;
   for (const dy of [0, -1]) {
     const o = at(p.x + dir, p.y + dy); if (!o || isPerson(o)) continue;
-    const e = elements[o.element]; if (e.hzb || e.hazard || kindOf(o) !== 2) continue;
+    const e = elements[o.element]; if (!e || e.hzb || e.fdn || e.hazard || kindOf(o) !== 2) continue;
     if (isTreePart(o) || o.element === "plant") { fellTree(p, isTreePart(o) ? (treeBase(o) || o) : o); return true; }
     if (p.task && p.task.pri >= 85 && p.task.k !== "flee") return false;
     deletePixel(o.x, o.y); did = true;
@@ -531,16 +552,16 @@ TASKS.cool = function (p, t) {
 };
 function drinkSource(p) {
   const wells = H2.st.well || [];
-  const w = H2.nearestOf(wells, p.x, p.y, 120);
+  const w = H2.nearestOf(wells, p.x, p.y, 120, (s) => !isBad(p, s.x, s.y) && (s.fac === undefined || s.fac === p.fac || !H2.war.on));
   if (w) return { x: w.x, y: w.y, well: true, px: w };
-  const o = H2.findNear(p.x, p.y, 80, (q) => q.element === "water" || q.element === "pool_water");
+  const o = H2.findNear(p.x, p.y, 80, (q) => (q.element === "water" || q.element === "pool_water") && !isBad(p, q.x, q.y) && !isPerson(at(q.x, q.y - 1)));
   if (o) return { x: o.x, y: o.y, well: false, px: o };
   return null;
 }
 TASKS.drink = function (p, t) {
   if (!t.src || (t.src.px && t.src.px.del)) { t.src = drinkSource(p); if (!t.src) { t.nofind = (t.nofind || 0) + 1; if (t.nofind > 15) return "fail"; return TASKS.wander(p, t); } }
   const r = goTo(p, t.src.x, t.src.y, 1, 3);
-  if (r === "fail") { t.src = null; return; }
+  if (r === "fail") { markBad(p, t.src.x, t.src.y); t.src = null; return; }
   if (r === "arrive") {
     t.n = (t.n || 0) + 1;
     if (t.n % 3 === 0) { p.th = Math.min(100, p.th + 18); if (!t.src.well && rnd() < 0.15 && t.src.px && !t.src.px.del) deletePixel(t.src.px.x, t.src.px.y); }
@@ -602,12 +623,20 @@ TASKS.socialize = function (p, t) {
    PERSON ELEMENTS
    ====================================================================== */
 const PANIC_FROM = ["fire","plasma","cold_fire","electric","tnt","dynamite","c4","grenade","gunpowder","acid","acid_gas","stench","blood","cancer","radiation","magma","lava","explosion","napalm"];
+// reactions may be triggered on the head pixel: always act on the body (the "brain" that owns all state)
+function brainOf(a) {
+  if (!a || a.del) return null;
+  if (a.element === "hz_head") { const b = at(a.x, a.y + 1); return b && b.element === "hz_body" && b.id !== undefined ? b : null; }
+  return (a.element === "hz_body" || a.element === "hz_child") && a.id !== undefined ? a : null;
+}
+H2.brainOf = brainOf;
 function personReactions() {
   const r = {};
-  for (const k of PANIC_FROM) r[k] = { attr1: { panic: k === "blood" ? 1 : 5 } };
-  r.plague = { func: function (a) { infect(a, "plague"); }, chance: 0.2 };
-  r.infection = { func: function (a) { infect(a, "flu"); }, chance: 0.1 };
-  r.alcohol = { chance: 0.2, attr1: { panic: 0 } }; r.anesthesia = { attr1: { panic: 0 } }; r.alcohol_gas = { chance: 0.2, attr1: { panic: 0 } };
+  for (const k of PANIC_FROM) { const v = k === "blood" ? 1 : 5; r[k] = { func: function (a) { const b = brainOf(a); if (b && !b.dead) b.panic = Math.max(b.panic || 0, v); } }; }
+  r.plague = { func: function (a) { const b = brainOf(a); if (b) infect(b, "plague"); }, chance: 0.2 };
+  r.infection = { func: function (a) { const b = brainOf(a); if (b) infect(b, "flu"); }, chance: 0.1 };
+  const calm = { func: function (a) { const b = brainOf(a); if (b) b.panic = 0; } };
+  r.alcohol = Object.assign({ chance: 0.2 }, calm); r.anesthesia = calm; r.alcohol_gas = Object.assign({ chance: 0.2 }, calm);
   return r;
 }
 function personChange(p, newEl) {
