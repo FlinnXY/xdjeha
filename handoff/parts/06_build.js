@@ -164,7 +164,7 @@ function planBuild(c) {
   const housePlanned = c.plans.some((p) => HOUSING[p.type]);
   if (!hasHall && pop >= 3 && can("hall", 0.55) && !c.plans.some((p) => p.type === "hall")) { if (queuePlan(c, "hall", { cx: c.x })) return; }
   if (haveCount(c, "campfire") === 0 && pop >= 2 && !c.plans.some((p) => p.type === "campfire") && s.wood >= 2) { if (queuePlan(c, "campfire", { cx: hasHall ? c.hall.x : c.x, range: 14 })) return; }
-  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 })) return; }
+  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 }) || queuePlan(c, "well", { range: 60, slope: 5 })) return; }
   if (housing < pop + 1 && !housePlanned) { if (planHouse(c, can)) return; }
   if (pop >= 5 && haveCount(c, "oven") === 0 && can("bakery", 0.7) && !c.plans.some((p) => p.type === "bakery")) { if (queuePlan(c, "bakery")) return; }
   if (pop >= 6 && haveCount(c, "market") === 0 && can("market", 0.7) && !c.plans.some((p) => p.type === "market")) { if (queuePlan(c, "market")) return; }
@@ -376,7 +376,7 @@ function pregnancyAndBirths(c) {
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
     if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
-    if (c.beds * 2 < c.pop || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
+    if (c.beds * 2 < c.pop || food < c.pop * 1.1 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }

@@ -273,6 +273,7 @@ function startPlague(x) {
   const c = pickTown(x, towns); if (!c) return false;
   const cands = H2.people.filter((p) => p.col === c.id && !p.dead && !p.sick && !isChildPx(p) && !p.nomad);
   if (!cands.length) return false;
+  c.plagueDead = 0;                                              // a fresh outbreak: the death toll is capped per outbreak
   infect(pick(cands), "plague");                                 // infect() writes its own (major) chronicle
   logEvent("plague", c.x);
   return true;
@@ -339,8 +340,10 @@ function eventsSchedule() {
     if (good.length) H2.events.trigger("festival", pick(good).x);
   }
   if (due("trader", DAY * 2) && rnd() < 0.2) H2.events.trigger("trader");
-  if (due("bandits", DAY * 4) && rnd() < 0.14) { const rich = towns.filter((c) => (c.pop || 0) >= 5); if (rich.length) H2.events.trigger("bandits", pick(rich).x); }
-  if (due("plague", DAY * 8) && rnd() < 0.08) { const crowd = towns.filter((c) => (c.pop || 0) >= 6); if (crowd.length) H2.events.trigger("plague", pick(crowd).x); }
+  // hardships only strike settled, grown towns (a young colony gets a few days of grace)
+  const settled = (c, pop, days) => (c.pop || 0) >= pop && pixelTicks - (c.founded || 0) > DAY * days;
+  if (due("bandits", DAY * 4) && rnd() < 0.14) { const rich = towns.filter((c) => settled(c, 10, 3)); if (rich.length) H2.events.trigger("bandits", pick(rich).x); }
+  if (due("plague", DAY * 8) && rnd() < 0.08) { const crowd = towns.filter((c) => settled(c, 14, 6)); if (crowd.length) H2.events.trigger("plague", pick(crowd).x); }
 }
 function eventsTick() {
   if (H2.cfg.events === false) { if (H2._bandits && H2._bandits.length) H2._bandits.length = 0; return; }

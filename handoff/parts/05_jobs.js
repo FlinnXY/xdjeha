@@ -180,12 +180,14 @@ function exposedRock(p, c) {
 }
 // a stepped open-cast quarry outside the village: each column is dug one cell deeper than the last, so it is always walkable
 function planQuarry(c) {
-  const order = [];
+  const order = [], near = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
     const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // just outside the built-up town (short walks for miners)
-    for (let d = Math.max(16, e); d <= Math.max(48, e + 26); d += 3) order.push(c.x + side * d);
-    for (let d = Math.max(16, e) - 3; d >= 10; d -= 3) order.push(c.x + side * d);    // cramped land: closer is better than nothing
+    // leave room for the town to grow first: the cut starts well beyond the houses
+    for (let d = Math.max(30, e); d <= Math.max(66, e + 30); d += 3) order.push(c.x + side * d);
+    for (let d = Math.max(30, e) - 3; d >= 10; d -= 3) near.push(c.x + side * d);     // cramped land: closer is better than nothing
   }
+  order.push(...near);
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
     const dir = Math.sign(x0 - c.x) || 1;
@@ -206,6 +208,9 @@ function planQuarry(c) {
       for (let y = top; y <= bottom; y++) cells.push([x, y]);
     }
     c.quarry = { x0: x0, dir: dir, cells: cells, i: 0, L: L };
+    // reserve the whole planned cut at once, so no house is ever sited over a pit that is still to be dug
+    const a = Math.min(x0, x0 + dir * L), b = Math.max(x0, x0 + dir * L);
+    c.quarry.pit = [a, b]; (c.pits || (c.pits = [])).push(c.quarry.pit);
     return c.quarry;
   }
   return null;
@@ -320,13 +325,13 @@ TASKS.farm = function (p, t) {
     if (r === "arrive") {
       const cx = t.crop.x, cy = t.crop.y, wasCrop = t.crop.element === "hz_crop";
       deletePixel(cx, cy); t.crop = null;
-      p.inv.grain = (p.inv.grain || 0) + (wasCrop ? 2 : 1); p.sk.farm++;
+      p.inv.grain = (p.inv.grain || 0) + (wasCrop ? 3 : 1); p.sk.farm++;
       if (rnd() < 0.9 && inb(cx, cy + 1) && at(cx, cy + 1) && SOIL[at(cx, cy + 1).element]) createPixel("hz_crop", cx, cy);
     }
     return;
   }
   // 2. plant new ones (until the field is large enough)
-  const want = Math.round(c.pop * 0.9 + 4);
+  const want = Math.round(c.pop * 1.4 + 6);
   if ((H2.crops || []).filter((q) => !q.del && Math.abs(q.x - c.x) < 60).length < want) {
     if (!t.spot) { t.spot = farmSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 6) return "fail"; return TASKS.wander(p, t); } }
     const r = goTo(p, t.spot.x, t.spot.y, 1, 3);

@@ -668,6 +668,40 @@ function findPath(p, tx, ty, range, vy) {
   return pts;
 }
 H2.findPath = findPath;
+// safety net: somebody sealed into a pocket (a collapsed tunnel, a cavity under a foundation) climbs out to the
+// nearest open ground instead of starving there. Only used when the reachable area has no way to the open sky.
+function trapped(p) {
+  const ch = isChildPx(p);
+  const x0 = Math.max(1, p.x - 24), x1 = Math.min(width - 1, p.x + 24), Hh = height + 1;
+  const stand = (x, y) => x >= x0 && x <= x1 && y >= 1 && y < height && pfPass(x, y, p) && (ch || pfPass(x, y - 1, p)) && pfSupport(x, y);
+  const seen = new Uint8Array((x1 - x0 + 1) * Hh), q = [[p.x, p.y]]; seen[(p.x - x0) * Hh + p.y] = 1;
+  let n = 0;
+  const sky = (x, y) => { for (let yy = y - (ch ? 1 : 2); yy >= 0; yy--) if (!pfPass(x, yy, p)) return false; return true; };
+  while (q.length && n++ < 1500) {
+    const [cx, cy] = q.shift();
+    if (sky(cx, cy) || isLadder(cx, cy) || isLadder(cx, cy + 1)) return false;
+    for (const dx of [-1, 1]) for (const dy of [0, -1, -2, 1, 2, 3, 4]) {
+      const nx = cx + dx, ny = cy + dy; if (nx < x0 || nx > x1 || ny < 1 || ny >= height) continue;
+      if (dy < 0 && !pfPass(cx, cy - (ch ? 1 : 2) + dy + 1, p)) continue;
+      if (dy > 0 && !pfPass(nx, cy, p)) continue;
+      const k = (nx - x0) * Hh + ny; if (seen[k] || !stand(nx, ny)) continue; seen[k] = 1; q.push([nx, ny]);
+    }
+  }
+  return n < 1500;
+}
+function rescue(p) {
+  const ch = isChildPx(p), h = ch ? null : headOf(p);
+  for (let d = 1; d <= 30; d++) for (const sg of [1, -1]) {
+    const x = p.x + sg * d; if (x < 2 || x > width - 3) continue;
+    const g = columnGround(x); if (g < 2 || g < p.y - 40) continue;
+    if (!isEmpty(x, g) || (!ch && !isEmpty(x, g - 1))) continue;
+    movePixel(p, x, g); if (h) movePixel(h, x, g - 1);
+    p.path = null; p.stk = 0; p.fails = 0; p.task = null;
+    return true;
+  }
+  return false;
+}
+H2.trapped = trapped; H2.rescue = rescue;
 // direction to walk according to the cached path (null when there is no usable path)
 function pathDir(p, tx, ty, range, vy) {
   let P = p.path;
@@ -751,12 +785,13 @@ function infect(p, kind) {
   return true;
 }
 H2.infect = infect;
-const DISEASE = { cold: { dur: 5000, dmg: 0.02, spread: 0.05 }, flu: { dur: 8000, dmg: 0.12, spread: 0.06 }, plague: { dur: 14000, dmg: 0.32, spread: 0.1 } };
+const DISEASE = { cold: { dur: 5000, dmg: 0.02, spread: 0.05 }, flu: { dur: 8000, dmg: 0.12, spread: 0.06 }, plague: { dur: 9000, dmg: 0.1, spread: 0.05 } };
 
 function die(p, cause, killer, gone) {
   if (!p || p.dead === undefined) return;
   if (p.dead) return;
   const ch = isChildPx(p);
+  if (p.sick && p.sick.k === "plague") { const pc = colById(p.col); if (pc) pc.plagueDead = (pc.plagueDead || 0) + 1; }
   p.dead = pixelTicks; p.cause = cause || "unknown causes"; p.task = null; p.sleeping = false;
   H2.stats.deaths++;
   const age = Math.floor(ageOf(p) / DAY);
@@ -869,6 +904,9 @@ function vitals(p) {
     if (age > ELDER_T && h && !p.grey) { p.grey = true; h.color = "#cfcfcf"; }
     if (age > LIFE_T * 0.8) { const hz = clamp((age - LIFE_T * 0.8) / (LIFE_T * 0.4), 0, 3) * 0.002; if (rnd() < hz) { die(p, "old age"); return; } }
   }
+  // --- trapped? (checked only when somebody has not moved for a long while)
+  if (Math.abs(p.x - (p.anX || 0)) > 3 || Math.abs(p.y - (p.anY || 0)) > 3) { p.anX = p.x; p.anY = p.y; p.anT = pixelTicks; }
+  else if (!sleeping && pixelTicks - p.anT > 900 && !p.jail) { p.anT = pixelTicks; if (trapped(p)) rescue(p); }
   // --- needs
   p.hu = clamp(p.hu - (sleeping ? 0.07 : 0.14) * (p.task && p.task.work ? 1.2 : 1), 0, 100);
   p.th = clamp(p.th - (sleeping ? 0.1 : 0.26) * (p.bt > 38 ? 1.5 : 1), 0, 100);
@@ -899,7 +937,9 @@ function vitals(p) {
   }
   if (p.sick) {
     const D = DISEASE[p.sick.k] || DISEASE.cold;
-    dmg += D.dmg * (p.treated ? 0.2 : 1); if (D.dmg > 0.1) cause = cause || "disease";
+    let sev = p.treated ? 0.2 : 1;
+    if (p.sick.k === "plague") { const pc = colById(p.col); if (pc && (pc.plagueDead || 0) >= Math.max(1, Math.floor((pc.pop || 0) * 0.2))) sev *= 0.15; }   // the worst is over: survivors pull through
+    dmg += D.dmg * sev; if (D.dmg >= 0.1) cause = cause || "disease";
     if (pixelTicks - p.sick.s > D.dur * (p.treated ? 0.5 : 1)) { const k = p.sick.k; (p.imm = p.imm || []).push(k); p.sick = null; p.treated = false; if (k === "plague") chronicle(nm(p) + " survived the plague and is now immune!", true, p.fac); }
     else if (rnd() < D.spread) { // contagion
       const near = H2.people; for (let i = 0; i < near.length; i++) { const o = near[i]; if (o === p || o.dead || o.sick) continue; if (Math.abs(o.x - p.x) < 4 && Math.abs(o.y - p.y) < 3) infect(o, p.sick.k); }
@@ -1004,7 +1044,7 @@ function think(p) {
   if (p.bt > 38.6) { if (setTask(p, "cool", { until: pixelTicks + 300 }, 60)) return; }
   // 5. thirst, hunger
   if (p.th < 35 && p.flask > 0) { p.flask--; p.th = Math.min(100, p.th + 45); }      // a sip from the waterskin saves a trip
-  if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : 55)) return; }
+  if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : p.th < 25 ? 66 : 55)) return; }
   if (p.hu < 32) { if (setTask(p, "eat", {}, p.hu < 10 ? 70 : 50)) return; }
   // 6. sleep
   if ((isNight() && p.en < 70) || p.en < 18) { if (p.th >= 12 && p.hu >= 6 && setTask(p, "sleep", {}, p.en < 6 ? 65 : 45)) return; }
@@ -1074,9 +1114,11 @@ TASKS.cool = function (p, t) {
 function drinkSource(p) {
   const wells = H2.st.well || [];
   const w = H2.nearestOf(wells, p.x, p.y, 120, (s) => !isBad(p, s.x, s.y) && (s.fac === undefined || s.fac === p.fac || !H2.war.on));
-  if (w) return { x: w.x, y: w.y, well: true, px: w };
-  const o = H2.findNear(p.x, p.y, 80, (q) => (q.element === "water" || q.element === "pool_water") && !isBad(p, q.x, q.y) && !isPerson(at(q.x, q.y - 1)));
+  // a lake or stream nearby beats a long walk to a well (a well only wins when it is not much further away)
+  const wd = w ? Math.abs(w.x - p.x) + Math.abs(w.y - p.y) : 1e9;
+  const o = wd > 20 ? H2.findNear(p.x, p.y, Math.min(80, wd - 15), (q) => (q.element === "water" || q.element === "pool_water") && !isBad(p, q.x, q.y) && !isPerson(at(q.x, q.y - 1))) : null;
   if (o) return { x: o.x, y: o.y, well: false, px: o };
+  if (w) return { x: w.x, y: w.y, well: true, px: w };
   return null;
 }
 TASKS.drink = function (p, t) {
@@ -1718,12 +1760,14 @@ function exposedRock(p, c) {
 }
 // a stepped open-cast quarry outside the village: each column is dug one cell deeper than the last, so it is always walkable
 function planQuarry(c) {
-  const order = [];
+  const order = [], near = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
     const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // just outside the built-up town (short walks for miners)
-    for (let d = Math.max(16, e); d <= Math.max(48, e + 26); d += 3) order.push(c.x + side * d);
-    for (let d = Math.max(16, e) - 3; d >= 10; d -= 3) order.push(c.x + side * d);    // cramped land: closer is better than nothing
+    // leave room for the town to grow first: the cut starts well beyond the houses
+    for (let d = Math.max(30, e); d <= Math.max(66, e + 30); d += 3) order.push(c.x + side * d);
+    for (let d = Math.max(30, e) - 3; d >= 10; d -= 3) near.push(c.x + side * d);     // cramped land: closer is better than nothing
   }
+  order.push(...near);
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
     const dir = Math.sign(x0 - c.x) || 1;
@@ -1744,6 +1788,9 @@ function planQuarry(c) {
       for (let y = top; y <= bottom; y++) cells.push([x, y]);
     }
     c.quarry = { x0: x0, dir: dir, cells: cells, i: 0, L: L };
+    // reserve the whole planned cut at once, so no house is ever sited over a pit that is still to be dug
+    const a = Math.min(x0, x0 + dir * L), b = Math.max(x0, x0 + dir * L);
+    c.quarry.pit = [a, b]; (c.pits || (c.pits = [])).push(c.quarry.pit);
     return c.quarry;
   }
   return null;
@@ -1858,13 +1905,13 @@ TASKS.farm = function (p, t) {
     if (r === "arrive") {
       const cx = t.crop.x, cy = t.crop.y, wasCrop = t.crop.element === "hz_crop";
       deletePixel(cx, cy); t.crop = null;
-      p.inv.grain = (p.inv.grain || 0) + (wasCrop ? 2 : 1); p.sk.farm++;
+      p.inv.grain = (p.inv.grain || 0) + (wasCrop ? 3 : 1); p.sk.farm++;
       if (rnd() < 0.9 && inb(cx, cy + 1) && at(cx, cy + 1) && SOIL[at(cx, cy + 1).element]) createPixel("hz_crop", cx, cy);
     }
     return;
   }
   // 2. plant new ones (until the field is large enough)
-  const want = Math.round(c.pop * 0.9 + 4);
+  const want = Math.round(c.pop * 1.4 + 6);
   if ((H2.crops || []).filter((q) => !q.del && Math.abs(q.x - c.x) < 60).length < want) {
     if (!t.spot) { t.spot = farmSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 6) return "fail"; return TASKS.wander(p, t); } }
     const r = goTo(p, t.spot.x, t.spot.y, 1, 3);
@@ -2345,7 +2392,7 @@ function planBuild(c) {
   const housePlanned = c.plans.some((p) => HOUSING[p.type]);
   if (!hasHall && pop >= 3 && can("hall", 0.55) && !c.plans.some((p) => p.type === "hall")) { if (queuePlan(c, "hall", { cx: c.x })) return; }
   if (haveCount(c, "campfire") === 0 && pop >= 2 && !c.plans.some((p) => p.type === "campfire") && s.wood >= 2) { if (queuePlan(c, "campfire", { cx: hasHall ? c.hall.x : c.x, range: 14 })) return; }
-  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 })) return; }
+  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 }) || queuePlan(c, "well", { range: 60, slope: 5 })) return; }
   if (housing < pop + 1 && !housePlanned) { if (planHouse(c, can)) return; }
   if (pop >= 5 && haveCount(c, "oven") === 0 && can("bakery", 0.7) && !c.plans.some((p) => p.type === "bakery")) { if (queuePlan(c, "bakery")) return; }
   if (pop >= 6 && haveCount(c, "market") === 0 && can("market", 0.7) && !c.plans.some((p) => p.type === "market")) { if (queuePlan(c, "market")) return; }
@@ -2557,7 +2604,7 @@ function pregnancyAndBirths(c) {
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
     if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
-    if (c.beds * 2 < c.pop || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
+    if (c.beds * 2 < c.pop || food < c.pop * 1.1 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }
@@ -4391,6 +4438,7 @@ function startPlague(x) {
   const c = pickTown(x, towns); if (!c) return false;
   const cands = H2.people.filter((p) => p.col === c.id && !p.dead && !p.sick && !isChildPx(p) && !p.nomad);
   if (!cands.length) return false;
+  c.plagueDead = 0;                                              // a fresh outbreak: the death toll is capped per outbreak
   infect(pick(cands), "plague");                                 // infect() writes its own (major) chronicle
   logEvent("plague", c.x);
   return true;
@@ -4457,8 +4505,10 @@ function eventsSchedule() {
     if (good.length) H2.events.trigger("festival", pick(good).x);
   }
   if (due("trader", DAY * 2) && rnd() < 0.2) H2.events.trigger("trader");
-  if (due("bandits", DAY * 4) && rnd() < 0.14) { const rich = towns.filter((c) => (c.pop || 0) >= 5); if (rich.length) H2.events.trigger("bandits", pick(rich).x); }
-  if (due("plague", DAY * 8) && rnd() < 0.08) { const crowd = towns.filter((c) => (c.pop || 0) >= 6); if (crowd.length) H2.events.trigger("plague", pick(crowd).x); }
+  // hardships only strike settled, grown towns (a young colony gets a few days of grace)
+  const settled = (c, pop, days) => (c.pop || 0) >= pop && pixelTicks - (c.founded || 0) > DAY * days;
+  if (due("bandits", DAY * 4) && rnd() < 0.14) { const rich = towns.filter((c) => settled(c, 10, 3)); if (rich.length) H2.events.trigger("bandits", pick(rich).x); }
+  if (due("plague", DAY * 8) && rnd() < 0.08) { const crowd = towns.filter((c) => settled(c, 14, 6)); if (crowd.length) H2.events.trigger("plague", pick(crowd).x); }
 }
 function eventsTick() {
   if (H2.cfg.events === false) { if (H2._bandits && H2._bandits.length) H2._bandits.length = 0; return; }

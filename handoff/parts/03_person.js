@@ -321,6 +321,40 @@ function findPath(p, tx, ty, range, vy) {
   return pts;
 }
 H2.findPath = findPath;
+// safety net: somebody sealed into a pocket (a collapsed tunnel, a cavity under a foundation) climbs out to the
+// nearest open ground instead of starving there. Only used when the reachable area has no way to the open sky.
+function trapped(p) {
+  const ch = isChildPx(p);
+  const x0 = Math.max(1, p.x - 24), x1 = Math.min(width - 1, p.x + 24), Hh = height + 1;
+  const stand = (x, y) => x >= x0 && x <= x1 && y >= 1 && y < height && pfPass(x, y, p) && (ch || pfPass(x, y - 1, p)) && pfSupport(x, y);
+  const seen = new Uint8Array((x1 - x0 + 1) * Hh), q = [[p.x, p.y]]; seen[(p.x - x0) * Hh + p.y] = 1;
+  let n = 0;
+  const sky = (x, y) => { for (let yy = y - (ch ? 1 : 2); yy >= 0; yy--) if (!pfPass(x, yy, p)) return false; return true; };
+  while (q.length && n++ < 1500) {
+    const [cx, cy] = q.shift();
+    if (sky(cx, cy) || isLadder(cx, cy) || isLadder(cx, cy + 1)) return false;
+    for (const dx of [-1, 1]) for (const dy of [0, -1, -2, 1, 2, 3, 4]) {
+      const nx = cx + dx, ny = cy + dy; if (nx < x0 || nx > x1 || ny < 1 || ny >= height) continue;
+      if (dy < 0 && !pfPass(cx, cy - (ch ? 1 : 2) + dy + 1, p)) continue;
+      if (dy > 0 && !pfPass(nx, cy, p)) continue;
+      const k = (nx - x0) * Hh + ny; if (seen[k] || !stand(nx, ny)) continue; seen[k] = 1; q.push([nx, ny]);
+    }
+  }
+  return n < 1500;
+}
+function rescue(p) {
+  const ch = isChildPx(p), h = ch ? null : headOf(p);
+  for (let d = 1; d <= 30; d++) for (const sg of [1, -1]) {
+    const x = p.x + sg * d; if (x < 2 || x > width - 3) continue;
+    const g = columnGround(x); if (g < 2 || g < p.y - 40) continue;
+    if (!isEmpty(x, g) || (!ch && !isEmpty(x, g - 1))) continue;
+    movePixel(p, x, g); if (h) movePixel(h, x, g - 1);
+    p.path = null; p.stk = 0; p.fails = 0; p.task = null;
+    return true;
+  }
+  return false;
+}
+H2.trapped = trapped; H2.rescue = rescue;
 // direction to walk according to the cached path (null when there is no usable path)
 function pathDir(p, tx, ty, range, vy) {
   let P = p.path;
@@ -404,12 +438,13 @@ function infect(p, kind) {
   return true;
 }
 H2.infect = infect;
-const DISEASE = { cold: { dur: 5000, dmg: 0.02, spread: 0.05 }, flu: { dur: 8000, dmg: 0.12, spread: 0.06 }, plague: { dur: 14000, dmg: 0.32, spread: 0.1 } };
+const DISEASE = { cold: { dur: 5000, dmg: 0.02, spread: 0.05 }, flu: { dur: 8000, dmg: 0.12, spread: 0.06 }, plague: { dur: 9000, dmg: 0.1, spread: 0.05 } };
 
 function die(p, cause, killer, gone) {
   if (!p || p.dead === undefined) return;
   if (p.dead) return;
   const ch = isChildPx(p);
+  if (p.sick && p.sick.k === "plague") { const pc = colById(p.col); if (pc) pc.plagueDead = (pc.plagueDead || 0) + 1; }
   p.dead = pixelTicks; p.cause = cause || "unknown causes"; p.task = null; p.sleeping = false;
   H2.stats.deaths++;
   const age = Math.floor(ageOf(p) / DAY);
@@ -522,6 +557,9 @@ function vitals(p) {
     if (age > ELDER_T && h && !p.grey) { p.grey = true; h.color = "#cfcfcf"; }
     if (age > LIFE_T * 0.8) { const hz = clamp((age - LIFE_T * 0.8) / (LIFE_T * 0.4), 0, 3) * 0.002; if (rnd() < hz) { die(p, "old age"); return; } }
   }
+  // --- trapped? (checked only when somebody has not moved for a long while)
+  if (Math.abs(p.x - (p.anX || 0)) > 3 || Math.abs(p.y - (p.anY || 0)) > 3) { p.anX = p.x; p.anY = p.y; p.anT = pixelTicks; }
+  else if (!sleeping && pixelTicks - p.anT > 900 && !p.jail) { p.anT = pixelTicks; if (trapped(p)) rescue(p); }
   // --- needs
   p.hu = clamp(p.hu - (sleeping ? 0.07 : 0.14) * (p.task && p.task.work ? 1.2 : 1), 0, 100);
   p.th = clamp(p.th - (sleeping ? 0.1 : 0.26) * (p.bt > 38 ? 1.5 : 1), 0, 100);
@@ -552,7 +590,9 @@ function vitals(p) {
   }
   if (p.sick) {
     const D = DISEASE[p.sick.k] || DISEASE.cold;
-    dmg += D.dmg * (p.treated ? 0.2 : 1); if (D.dmg > 0.1) cause = cause || "disease";
+    let sev = p.treated ? 0.2 : 1;
+    if (p.sick.k === "plague") { const pc = colById(p.col); if (pc && (pc.plagueDead || 0) >= Math.max(1, Math.floor((pc.pop || 0) * 0.2))) sev *= 0.15; }   // the worst is over: survivors pull through
+    dmg += D.dmg * sev; if (D.dmg >= 0.1) cause = cause || "disease";
     if (pixelTicks - p.sick.s > D.dur * (p.treated ? 0.5 : 1)) { const k = p.sick.k; (p.imm = p.imm || []).push(k); p.sick = null; p.treated = false; if (k === "plague") chronicle(nm(p) + " survived the plague and is now immune!", true, p.fac); }
     else if (rnd() < D.spread) { // contagion
       const near = H2.people; for (let i = 0; i < near.length; i++) { const o = near[i]; if (o === p || o.dead || o.sick) continue; if (Math.abs(o.x - p.x) < 4 && Math.abs(o.y - p.y) < 3) infect(o, p.sick.k); }
@@ -657,7 +697,7 @@ function think(p) {
   if (p.bt > 38.6) { if (setTask(p, "cool", { until: pixelTicks + 300 }, 60)) return; }
   // 5. thirst, hunger
   if (p.th < 35 && p.flask > 0) { p.flask--; p.th = Math.min(100, p.th + 45); }      // a sip from the waterskin saves a trip
-  if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : 55)) return; }
+  if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : p.th < 25 ? 66 : 55)) return; }
   if (p.hu < 32) { if (setTask(p, "eat", {}, p.hu < 10 ? 70 : 50)) return; }
   // 6. sleep
   if ((isNight() && p.en < 70) || p.en < 18) { if (p.th >= 12 && p.hu >= 6 && setTask(p, "sleep", {}, p.en < 6 ? 65 : 45)) return; }
@@ -727,9 +767,11 @@ TASKS.cool = function (p, t) {
 function drinkSource(p) {
   const wells = H2.st.well || [];
   const w = H2.nearestOf(wells, p.x, p.y, 120, (s) => !isBad(p, s.x, s.y) && (s.fac === undefined || s.fac === p.fac || !H2.war.on));
-  if (w) return { x: w.x, y: w.y, well: true, px: w };
-  const o = H2.findNear(p.x, p.y, 80, (q) => (q.element === "water" || q.element === "pool_water") && !isBad(p, q.x, q.y) && !isPerson(at(q.x, q.y - 1)));
+  // a lake or stream nearby beats a long walk to a well (a well only wins when it is not much further away)
+  const wd = w ? Math.abs(w.x - p.x) + Math.abs(w.y - p.y) : 1e9;
+  const o = wd > 20 ? H2.findNear(p.x, p.y, Math.min(80, wd - 15), (q) => (q.element === "water" || q.element === "pool_water") && !isBad(p, q.x, q.y) && !isPerson(at(q.x, q.y - 1))) : null;
   if (o) return { x: o.x, y: o.y, well: false, px: o };
+  if (w) return { x: w.x, y: w.y, well: true, px: w };
   return null;
 }
 TASKS.drink = function (p, t) {
