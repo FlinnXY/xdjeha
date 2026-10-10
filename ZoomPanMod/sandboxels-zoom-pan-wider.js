@@ -1,17 +1,22 @@
 // =====================================================================
 //  Sandboxels mod: Even Wider canvas + smooth zoom + middle-mouse pan
 //
-//  1. Settings > Canvas Size gets a new option, "Even Wider": the
-//     simulation is twice as wide as "Wide" (fitted to your screen).
-//  2. Mouse wheel = SMOOTH zoom, centred on the mouse cursor.
-//     (Shift + wheel still changes the brush size.)
-//  3. Hold the MIDDLE mouse button and drag to pan while zoomed in.
-//     A quick middle-click without dragging still picks the element.
-//  4. A small zoom slider in the bottom button row. Click the "1.00x"
-//     label next to it to reset the view.
+//  1. Settings > Canvas Size gets a new option, "Even Wider": the scene
+//     is twice as wide as "Wide" and exactly as tall as "Wide". It is NOT
+//     squeezed onto the screen - pan across it with the middle mouse button.
+//  2. Ctrl + mouse wheel = SMOOTH zoom (0.5x - 32x), centred on the cursor.
+//     The plain wheel still changes the brush size, exactly like vanilla.
+//  3. Hold the MIDDLE mouse button and drag to pan. You can pan the scene
+//     out past the edges of the view. A middle-click without dragging still
+//     picks the element, like in vanilla.
+//  4. A small zoom slider in the bottom button row. Click the "1.00x" label
+//     next to it to reset zoom and pan.
 //
-//  Load it with a jsDelivr URL in Mods > Mod Manager, e.g.
-//  https://cdn.jsdelivr.net/gh/YOUR_USER/YOUR_REPO@main/sandboxels-zoom-pan-wider.js
+//  How zoom works: the canvas is really resized and repositioned (not
+//  CSS-scaled), so the game's own mouse-to-pixel mapping stays exact at
+//  every zoom level and pan position.
+//
+//  Load it with a jsDelivr URL in Mods > Mod Manager.
 // =====================================================================
 (function () {
   "use strict";
@@ -19,12 +24,13 @@
   window.__swzpLoaded = true;
 
   /* ------------------------------ config ------------------------------ */
-  const MIN_ZOOM = 1;
+  const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 32;
   const WHEEL_SENS = 0.0018;   // ln-zoom per wheel pixel (one 100px notch is about x1.2)
-  const PINCH_SENS = 0.01;     // trackpad pinch (arrives as ctrl + wheel)
+  const PINCH_SENS = 0.01;     // trackpad pinch (small fractional ctrl + wheel deltas)
   const SMOOTH_MS = 90;        // zoom smoothing time constant (lower = snappier)
   const PAN_CLICK_PX = 4;      // middle-drag shorter than this counts as a click
+  const EDGE_MARGIN = 120;     // px of the scene that always stay inside the view when panning
   const SLIDER_STEPS = 1000;
   const LN_MIN = Math.log(MIN_ZOOM);
   const LN_MAX = Math.log(MAX_ZOOM);
@@ -44,9 +50,9 @@
     pixelSize = parseInt(settings.pixelsize) || 6;
     if (window.innerWidth < 700) pixelSize--;
 
-    const fitWidth = window.innerWidth - 10;     // what "Wide" uses
-    let newHeight = window.innerHeight / 1.6;    // same height as "Wide"
-    let newWidth = fitWidth * 2;                 // twice as many columns
+    const viewWidth = window.innerWidth - 10;    // what "Wide" uses
+    let newHeight = window.innerHeight / 1.6;    // exactly the height of "Wide"
+    let newWidth = viewWidth * 2;                // twice as many columns
 
     if (ratio) {
       if (newHeight < newWidth) newWidth = ratio * newHeight;
@@ -56,11 +62,8 @@
     const gameDiv = document.getElementById("gameDiv");
     gameDiv.classList.add("gameDiv-wide");
     resizeCanvas(newHeight, newWidth, pixelSize, clear);
-
-    // The canvas holds 2x the columns but is displayed fitted to the screen.
-    const shown = Math.min(newWidth, fitWidth);
-    gameDiv.style.width = shown + "px";
-    document.getElementById("game").style.width = shown + "px";
+    // The visible window stays screen-wide; the scene is panned inside it.
+    gameDiv.style.width = Math.min(newWidth, viewWidth) + "px";
   }
 
   let originalAutoResize = null;
@@ -68,16 +71,17 @@
   function canvasSignature() {
     const c = document.getElementById("game");
     const g = document.getElementById("gameDiv");
-    return c.width + "x" + c.height + "|" + g.style.width;
+    return c.width + "x" + c.height + "|" + g.style.width + "|" + isEvenWide();
   }
 
   function autoResizeWrapper(clear, ratio) {
     const before = canvasSignature();
-    if (isEvenWide()) {
+    const even = isEvenWide();
+    document.getElementById("game").classList.toggle("swzp-even", even);
+    if (even) {
       evenWideResize(clear, ratio);
-    } else {
-      if (originalAutoResize) originalAutoResize.apply(this, arguments);
-      document.getElementById("game").style.width = "";   // drop our fitted width
+    } else if (originalAutoResize) {
+      originalAutoResize.apply(this, arguments);
     }
     // New canvas dimensions invalidate the zoom state; a plain scene reset keeps it.
     if (canvasSignature() !== before) resetView();
@@ -115,14 +119,19 @@
   /*  Part 2: smooth zoom, middle-mouse pan, zoom slider                    */
   /* ===================================================================== */
 
-  // View state. `ln` is the current (animated) log-zoom, `target` where it is
-  // heading. (ox, oy) is the canvas offset in px from its natural position.
-  // `anchor` is the canvas point (in unscaled canvas px) that must stay under
-  // the client position (cx, cy) while zooming.
-  const st = { ln: LN_MIN, target: LN_MIN, ox: 0, oy: 0, anchor: null, raf: 0, last: 0 };
+  // View state. `ln` is the current (animated) log-zoom and `target` where it
+  // is heading. (ox, oy) is the canvas offset in whole px from its default,
+  // centred position. `anchor` is the point of the scene (as fractions of its
+  // size) that must stay under the client position (cx, cy) while zooming.
+  const st = { ln: 0, target: 0, ox: 0, oy: 0, anchor: null, raf: 0, last: 0 };
   let canvasEl = null, viewEl = null, slider = null, label = null;
   let sliderDragging = false;
   let pan = null;
+  let lastClient = null;
+
+  // Natural (zoom 1.0) size of the canvas and of the view, measured while the
+  // canvas has none of our inline styles. `free` = our inline styles are on.
+  let W0 = 0, H0 = 0, VIEW_H = 0, free = false;
 
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
@@ -130,25 +139,38 @@
     try { return !!showingMenu; } catch (_) { return false; }
   }
 
-  // Natural (untransformed) top-left of the canvas in client coordinates.
-  // The transform origin is the top-left corner, so scale never moves it.
-  function naturalPos() {
-    const r = canvasEl.getBoundingClientRect();
-    return { nl: r.left - st.ox, nt: r.top - st.oy };
+  function clearInline() {
+    canvasEl.classList.remove("swzp-free");
+    const s = canvasEl.style;
+    s.width = ""; s.height = ""; s.left = ""; s.top = "";
+    viewEl.style.height = "";
+    free = false;
   }
 
-  // Keep the canvas covering the view (or fully inside it when smaller).
-  function clampOffsets(ox, oy, s, nl, nt) {
+  function measureBase() {
+    clearInline();
+    const r = canvasEl.getBoundingClientRect();
+    W0 = r.width; H0 = r.height;
+    VIEW_H = viewEl.getBoundingClientRect().height;
+  }
+
+  function ensureBase() { if (!free) measureBase(); }
+
+  // Where the canvas' top-left sits (client coords) at offset (0, 0).
+  function naturalPos() {
     const v = viewEl.getBoundingClientRect();
-    function axis(natural, size, vmin, vmax, val) {
-      const a = vmax - size, b = vmin;
-      const lo = Math.min(a, b), hi = Math.max(a, b);
-      return clamp(natural + val, lo, hi) - natural;
-    }
-    return [
-      axis(nl, canvasEl.offsetWidth * s, v.left, v.right, ox),
-      axis(nt, canvasEl.offsetHeight * s, v.top, v.bottom, oy)
-    ];
+    const natX = Math.round((viewEl.clientWidth - W0) / 2);
+    return { nl: v.left + viewEl.clientLeft + natX, nt: v.top + viewEl.clientTop, natX: natX };
+  }
+
+  // The scene may be panned out past the view, but a strip of it stays reachable.
+  function clampOffsets(ox, oy, Wpx, Hpx, p) {
+    const v = viewEl.getBoundingClientRect();
+    const mx = Math.min(EDGE_MARGIN, Wpx, v.width);
+    const my = Math.min(EDGE_MARGIN, Hpx, v.height);
+    const L = clamp(p.nl + ox, v.left + mx - Wpx, v.right - mx);
+    const T = clamp(p.nt + oy, v.top + my - Hpx, v.bottom - my);
+    return [Math.round(L - p.nl), Math.round(T - p.nt)];
   }
 
   function updateUi() {
@@ -159,36 +181,62 @@
     }
   }
 
+  // Cell of the scene under a client position, from the real on-screen rect.
+  function cellAt(cv, clientX, clientY) {
+    const r = cv.getBoundingClientRect();
+    return {
+      x: Math.floor(((clientX - r.left) / r.width) * (width + 1)),
+      y: Math.floor(((clientY - r.top) / r.height) * (height + 1))
+    };
+  }
+
+  // Keeps the brush preview glued to the cursor while the view moves under it.
+  function syncMousePos() {
+    if (!lastClient || !canvasEl) return;
+    try { mousePos = cellAt(canvasEl, lastClient.x, lastClient.y); } catch (_) { /* ignore */ }
+  }
+
   function paint() {
-    const s = Math.exp(st.ln);
-    if (s <= 1.0005) {
-      st.ox = 0; st.oy = 0;
-      canvasEl.style.transform = "";            // back to the game's own layout
-      canvasEl.style.transformOrigin = "";
-    } else {
-      canvasEl.style.transformOrigin = "0 0";
-      canvasEl.style.transform =
-        "translate(calc(-50% + " + st.ox + "px), " + st.oy + "px) scale(" + s + ")";
+    if (st.ln === 0 && st.ox === 0 && st.oy === 0) {      // untouched: the game's own layout
+      if (free) clearInline();
+      updateUi();
+      return;
     }
+    const s = Math.exp(st.ln);
+    const wasFree = free;
+    if (!wasFree) {
+      free = true;
+      canvasEl.classList.add("swzp-free");
+      viewEl.style.height = VIEW_H + "px";                // the page must not jump when zoomed
+    }
+    const natX = Math.round((viewEl.clientWidth - W0) / 2);
+    const cs = canvasEl.style;
+    cs.width = Math.round(W0 * s) + "px";
+    cs.height = Math.round(H0 * s) + "px";
+    cs.left = (natX + st.ox) + "px";
+    cs.top = st.oy + "px";
+    syncMousePos();
     updateUi();
   }
 
   function applyZoom() {
+    ensureBase();
     const s = Math.exp(st.ln);
+    const Wpx = Math.round(W0 * s), Hpx = Math.round(H0 * s);
     const p = naturalPos();
     let ox = st.ox, oy = st.oy;
     if (st.anchor) {
-      ox = st.anchor.cx - st.anchor.px * s - p.nl;
-      oy = st.anchor.cy - st.anchor.py * s - p.nt;
+      ox = Math.round(st.anchor.cx - st.anchor.fx * Wpx - p.nl);
+      oy = Math.round(st.anchor.cy - st.anchor.fy * Hpx - p.nt);
     }
-    const c = clampOffsets(ox, oy, s, p.nl, p.nt);
+    const c = clampOffsets(ox, oy, Wpx, Hpx, p);
     st.ox = c[0]; st.oy = c[1];
     paint();
   }
 
   function step(now) {
     st.raf = 0;
-    const dt = Math.min(64, Math.max(0, now - st.last));
+    const dt = Math.min(250, Math.max(0, now - st.last));   // large steps are fine: the smoothing is exact for any dt
     st.last = now;
     st.ln += (st.target - st.ln) * (1 - Math.exp(-dt / SMOOTH_MS));
     if (Math.abs(st.target - st.ln) < 0.0004) st.ln = st.target;
@@ -202,13 +250,18 @@
     st.raf = requestAnimationFrame(step);
   }
 
-  // Set a new zoom target, keeping the canvas point under (cx, cy) fixed.
+  // Set a new zoom target, keeping the scene point under (cx, cy) fixed.
   function setZoomTarget(ln, cx, cy) {
     if (!canvasEl) return;
-    const s = Math.exp(st.ln);
+    let t = clamp(ln, LN_MIN, LN_MAX);
+    if (Math.abs(t) < 0.03) t = 0;                         // snap to exactly 1.00x
     const r = canvasEl.getBoundingClientRect();
-    st.anchor = { cx: cx, cy: cy, px: (cx - r.left) / s, py: (cy - r.top) / s };
-    st.target = clamp(ln, LN_MIN, LN_MAX);
+    // While the cursor has not moved, keep the same anchor so rounding never accumulates.
+    const keep = st.anchor && st.ln !== st.target && st.anchor.cx === cx && st.anchor.cy === cy;
+    if (!keep && r.width > 0 && r.height > 0) {
+      st.anchor = { cx: cx, cy: cy, fx: (cx - r.left) / r.width, fy: (cy - r.top) / r.height };
+    }
+    st.target = t;
     if (st.target !== st.ln) schedule();
   }
 
@@ -216,39 +269,32 @@
 
   function resetView() {
     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
-    st.ln = st.target = LN_MIN;
-    st.ox = 0; st.oy = 0; st.anchor = null;
-    if (canvasEl) paint();
+    st.ln = 0; st.target = 0; st.ox = 0; st.oy = 0; st.anchor = null;
+    if (canvasEl) { clearInline(); paint(); }
   }
 
   /* ----------------------------- wheel zoom ----------------------------- */
 
-  let lastBrushScroll = 0;
+  function inView(e) {
+    const t = e.target;
+    return t === canvasEl || t === viewEl || (t && (t.id === "logDiv" || t.id === "logText"));
+  }
 
   function onWheel(e) {
-    if (e.target !== canvasEl || menuOpen()) return;
-    e.preventDefault();
-    e.stopPropagation();                         // keep the game's own wheel handler out
-
-    if (e.shiftKey) {                            // Shift + wheel: brush size, as in vanilla
-      const now = Date.now();
-      if (now - lastBrushScroll < 25) return;
-      lastBrushScroll = now;
-      let d = e.deltaY || e.deltaX;
-      if (settings.invertscroll) d = d > 0 ? 1 : -1;
-      else d = d < 0 ? 1 : -1;
-      mouseSize += Math.round(d);
-      checkMouseSize(Math.sign(d));
-      return;
-    }
+    // Only Ctrl + wheel zooms. A plain wheel is left completely alone, so the
+    // game's own handler keeps changing the brush size exactly like vanilla.
+    if (!e.ctrlKey || !inView(e) || menuOpen()) return;
+    e.preventDefault();                          // also stops the browser's own page zoom
+    e.stopPropagation();
 
     if (document.activeElement === slider) slider.blur();
-    let dy = e.deltaY;
+    let dy = e.deltaY || e.deltaX;
     if (e.deltaMode === 1) dy *= 33;             // lines -> px
     else if (e.deltaMode === 2) dy *= window.innerHeight;
-    const sens = e.ctrlKey ? PINCH_SENS : WHEEL_SENS;
+    // Trackpad pinch arrives as small fractional ctrl+wheel deltas: zoom faster for those.
+    const pinch = Math.abs(dy) < 40 && dy !== Math.round(dy);
     const dir = settings.invertscroll ? 1 : -1;  // wheel up = zoom in
-    zoomBy(dy * sens * dir, e.clientX, e.clientY);
+    zoomBy(dy * (pinch ? PINCH_SENS : WHEEL_SENS) * dir, e.clientX, e.clientY);
   }
 
   /* --------------------------- middle-mouse pan -------------------------- */
@@ -262,8 +308,19 @@
     }
   }
 
+  // On Linux a middle-click also fires a "paste" event (primary selection), which
+  // the game cannot handle when the clipboard is empty. Swallow those.
+  let lastMiddle = 0;
+  window.addEventListener("paste", function (e) {
+    if (Date.now() - lastMiddle < 600) { e.stopImmediatePropagation(); e.preventDefault(); }
+  }, true);
+  window.addEventListener("auxclick", function (e) {
+    if (e.button === 1 && inView(e)) e.preventDefault();
+  }, true);
+
   function onMouseDown(e) {
-    if (e.button !== 1 || e.target !== canvasEl || menuOpen()) return;
+    if (e.button !== 1 || !inView(e) || menuOpen()) return;
+    lastMiddle = Date.now();
     e.preventDefault();                          // no browser autoscroll circle
     e.stopPropagation();                         // the game must not start its middle action
     st.target = st.ln;                           // stop any zoom animation in progress
@@ -273,6 +330,7 @@
   }
 
   function onMouseMove(e) {
+    lastClient = { x: e.clientX, y: e.clientY };
     if (!pan) return;
     if (!(e.buttons & 4)) { endPan(null); return; }   // released outside the window
     if (!pan.moved && Math.hypot(e.clientX - pan.sx, e.clientY - pan.sy) >= PAN_CLICK_PX) {
@@ -280,16 +338,17 @@
     }
     const dx = e.clientX - pan.lx, dy = e.clientY - pan.ly;
     pan.lx = e.clientX; pan.ly = e.clientY;
-    if (st.ln > LN_MIN + 0.0005) {
-      const s = Math.exp(st.ln);
-      const p = naturalPos();
-      const c = clampOffsets(st.ox + dx, st.oy + dy, s, p.nl, p.nt);
-      st.ox = c[0]; st.oy = c[1];
-      paint();
-    }
+    if (dx === 0 && dy === 0) return;
+    ensureBase();
+    const s = Math.exp(st.ln);
+    const p = naturalPos();
+    const c = clampOffsets(st.ox + dx, st.oy + dy, Math.round(W0 * s), Math.round(H0 * s), p);
+    st.ox = c[0]; st.oy = c[1];
+    paint();
   }
 
   function onMouseUp(e) {
+    if (e.button === 1) lastMiddle = Date.now();
     if (!pan || e.button !== 1) return;
     e.stopPropagation();
     endPan(e);
@@ -305,6 +364,8 @@
     const css = document.createElement("style");
     css.textContent =
       "#canvasDiv{overflow:hidden !important;}" +
+      "#game.swzp-even{max-width:none !important;max-height:none !important;}" +
+      "#game.swzp-free{max-width:none !important;max-height:none !important;transform:none !important;}" +
       "#game.swzp-panning{cursor:grabbing !important;}" +
       "#swzp-zoom-wrap{display:inline-flex;align-items:center;flex:0 0 auto;gap:4px;padding:0 6px;}" +
       "#swzp-zoom-slider{width:90px;height:14px;margin:0;cursor:pointer;accent-color:#bbb;}" +
@@ -315,7 +376,7 @@
     if (bar) {
       const wrap = document.createElement("span");
       wrap.id = "swzp-zoom-wrap";
-      wrap.title = "Zoom: mouse wheel or this slider. Pan: hold the middle mouse button and drag.";
+      wrap.title = "Zoom: Ctrl + mouse wheel or this slider. Pan: hold the middle mouse button and drag.";
 
       slider = document.createElement("input");
       slider.type = "range";
@@ -356,33 +417,74 @@
     viewEl.addEventListener("mousedown", onMouseDown, true);
     window.addEventListener("mousemove", onMouseMove, true);
     window.addEventListener("mouseup", onMouseUp, true);
+    window.addEventListener("resize", function () { resetView(); });
     updateUi();
   }
 
-  // The game's own getMousePos divides by clientWidth, which ignores CSS
-  // transforms. Dividing by the on-screen rect makes the brush land under
-  // the cursor at any zoom / pan / canvas display size.
+  // Cursor -> grid cell, from the canvas' real on-screen rect. Because zoom
+  // resizes the canvas for real (no CSS transform), this and the game's own
+  // mapping always agree.
   window.getMousePos = function (cv, evt) {
     if (evt.touches) {
       evt.preventDefault();
       evt = evt.touches[0];
       isMobile = true;
     }
-    const r = cv.getBoundingClientRect();
-    return {
-      x: Math.floor(((evt.clientX - r.left) / r.width) * (width + 1)),
-      y: Math.floor(((evt.clientY - r.top) / r.height) * (height + 1))
-    };
+    return cellAt(cv, evt.clientX, evt.clientY);
   };
+
+  // Console helper:  sandboxelsZoomPan.test()
+  // Asks the game's getMousePos about a grid of cursor positions and compares
+  // the answer with the cell that is really drawn under the cursor.
+  function selfTest() {
+    if (!canvasEl) return "not ready";
+    const r = canvasEl.getBoundingClientRect();
+    const v = viewEl.getBoundingClientRect();
+    const x0 = Math.max(r.left, v.left), x1 = Math.min(r.right, v.right);
+    const y0 = Math.max(r.top, v.top), y1 = Math.min(r.bottom, v.bottom);
+    let bad = 0, n = 0;
+    for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) {
+      const cx = Math.round(x0 + (x1 - x0 - 1) * i / 8), cy = Math.round(y0 + (y1 - y0 - 1) * j / 8);
+      const want = cellAt(canvasEl, cx, cy);
+      const got = getMousePos(canvasEl, { clientX: cx, clientY: cy });
+      n++;
+      if (got.x !== want.x || got.y !== want.y) { bad++; console.warn("mismatch at", cx, cy, "want", want, "got", got); }
+    }
+    const msg = bad ? bad + " of " + n + " cursor positions map to the wrong cell" : "OK: all " + n + " cursor positions map to the right cell";
+    console.log("[zoom mod] " + msg);
+    return msg;
+  }
+
+  /* ===================================================================== */
+  /*  Part 3: no pixel limit                                                */
+  /* ===================================================================== */
+
+  // The game stops placing at maxPixelCount (13,861 by default) unless its
+  // "Limitless" setting is on. Pin the cap to "practically infinite" so it
+  // can never come back, whatever the setting says. The only remaining limit
+  // is physical: one pixel per grid cell.
+  const UNLIMITED = 999999999999;
+  try {
+    Object.defineProperty(window, "maxPixelCount", {
+      configurable: true,
+      enumerable: true,
+      get: function () { return UNLIMITED; },
+      set: function () { /* ignore the game's attempts to re-apply the cap */ }
+    });
+  } catch (_) {
+    runEveryTick(function () { maxPixelCount = UNLIMITED; });   // fallback if the property is locked
+  }
 
   runAfterLoad(function () {
     // Runs at the start of the game's onload: before the settings are applied
     // to the dropdowns, so a saved "Even Wider" choice is restored correctly.
+    try { settings.limitless = 1; if (typeof refreshMaxPixels === "function") refreshMaxPixels(); }
+    catch (_) { /* ignore */ }
     addSizeOption();
     canvasEl = document.getElementById("game");
     viewEl = document.getElementById("canvasDiv");
     buildUi();
   });
 
-  window.sandboxelsZoomPan = { reset: resetView };
+  window.sandboxelsZoomPan = { reset: resetView, test: selfTest };
 })();
