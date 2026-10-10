@@ -136,7 +136,8 @@ function groveSpot(p, c) {
   const side0 = c.groveSide || (c.groveSide = (c.x < width / 2 ? -1 : 1) * (rnd() < 0.7 ? 1 : -1));
   for (let tries = 0; tries < 16; tries++) {
     const side = tries < 10 ? side0 : -side0;
-    const x = clamp(Math.round(c.x + side * rint(20, 48)), 2, width - 3);
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;      // never inside the town's growing edge
+    const x = clamp(Math.round(c.x + side * rint(Math.max(24, e), Math.max(52, e + 28))), 2, width - 3);
     if (isBad(p, x, 0)) continue;
     const gy = groundY(x, clamp(c.y - 14, 0, height - 2), 30);
     if (gy < 8) continue;
@@ -166,8 +167,9 @@ TASKS.plant_trees = function (p, t) {
 const STONY = { rock: 1, gravel: 1, basalt: 1, granite: 1, limestone: 1, slate: 1, marble: 1, sandstone: 1, tuff: 1, quartz: 1, rock_wall: 1, packed_sand: 0, iron_ore: 1, ore: 1, raw_iron: 1, cobblestone: 1 };
 const isStony = (o) => !!o && STONY[o.element] === 1 && !o.hzb2;
 const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant" || o.element === "hz_crop" || o.element === "hz_sapling");
+const BRICKY = { dirt: 1, mud: 1, clay: 1, clay_soil: 1, hz_earth: 1, sand: 1, packed_sand: 1, gravel: 1 };
 function mineYield(p, o, c) {
-  if (!isStony(o)) return;
+  if (!isStony(o)) { if (BRICKY[o.element]) { p.inv.stone = (p.inv.stone || 0) + 0.5; p.sk.mine += 0.3; } return; }   // earth is fired into bricks
   p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
   const deep = clamp((o.y - (c ? c.y : o.y)) / 10, 0, 1);
   if (rnd() < 0.08 + deep * 0.12 || o.element === "iron_ore" || o.element === "raw_iron") p.inv.iron = (p.inv.iron || 0) + 1;
@@ -180,8 +182,9 @@ function exposedRock(p, c) {
 function planQuarry(c) {
   const order = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
-    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // always outside the built-up town
-    for (let d = Math.max(16, e); d <= Math.max(54, e + 28); d += 4) order.push(c.x + side * d);
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;         // always well outside the built-up town (room to grow)
+    for (let d = Math.max(28, e); d <= Math.max(60, e + 30); d += 4) order.push(c.x + side * d);
+    for (let d = Math.max(28, e) - 6; d >= 18; d -= 4) order.push(c.x + side * d);    // cramped land: closer is better than nothing
   }
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
@@ -615,5 +618,6 @@ function marry(a, b) {
   addThought(a, "wedding", 25, DAY * 3); addThought(b, "wedding", 25, DAY * 3);
   const c = colById(a.col); if (c && !c.festival) { c.festival = pixelTicks + 600; }
   chronicle(nm(m) + " and " + nm(f) + " were married!", true, a.fac);
+  life(m, "Married " + nm(f) + ".", "marry"); life(f, "Married " + nm(m) + ".", "marry");
 }
 H2.marry = marry;

@@ -58,12 +58,18 @@ H2.costOfPlan = costOfPlan;
 function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) return false; return true; }
 
 /* ---- site finding ---------------------------------------------------------- */
+const CLEARABLE = { wood: 1, tree_branch: 1, plant: 1, hz_sapling: 1, sapling: 1, dead_plant: 1, vine: 1 };
 function columnGround(x) { // y of free cell above the topmost solid thing, only if that is real ground
   if (x < 1 || x >= width - 1) return -1;
   for (let y = 0; y < height - 1; y++) {
-    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop") continue;   // decor and crops make way for buildings
+    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop" || CLEARABLE[o.element]) continue;   // decor, crops and trees make way for buildings
     if (isSoft(o) && (o.element !== "grass" || o.h > 0 || isSoft(pixelMap[x][y + 1]))) continue;  // grass blades / flowers are not ground
     if (elements[o.element] && elements[o.element].state === "gas") continue;
+    if (elements[o.element] && elements[o.element].state === "liquid") {          // blood and shallow puddles are mopped up; lakes are not ground
+      let d = 1; while (d <= 2 && pixelMap[x][y + d] && elements[pixelMap[x][y + d].element].state === "liquid") d++;
+      if (d <= 2 && groundish(pixelMap[x][y + d])) continue;
+      return -1;
+    }
     return groundish(o) ? y - 1 : -1;
   }
   return -1;
@@ -228,6 +234,7 @@ H2.planHouse = planHouse;
 H2.planBuild = planBuild;
 function completePlan(c, pl) {
   c.built[pl.type] = (c.built[pl.type] || 0) + 1;
+  if (pl.helpers && !DECOR[pl.type]) for (const id in pl.helpers) { const q = H2.byId[id]; if (q && !q.dead) { q.builtN = (q.builtN || 0) + 1; life(q, "Helped build " + (BUILD_NAMES[pl.type] || "a " + pl.type) + " in " + c.name + ".", "build"); } }
   if (!DECOR[pl.type] && pl.type !== "moat" && pl.type !== "cannon") c.ext = c.ext ? [Math.min(c.ext[0], pl.x0), Math.max(c.ext[1], pl.x1)] : [pl.x0, pl.x1];
   if (MAJOR_BUILD[pl.type]) {
     let msg = c.name + " completes " + BUILD_NAMES[pl.type] + ".";
@@ -304,6 +311,11 @@ TASKS.build = function (p, t) {
   p.buildCool = pixelTicks + (QUICK[el] ? 2 : Math.max(3, Math.round(6 - (p.sk.build || 0) * 0.6)));
   // is the cell already done?
   const o = pixelMap[cx][cy];
+  if (o && isTreePart(o) && !o.hzb2) {                                                         // a tree on the site: fell it whole, the wood goes to the store
+    const w0 = p.inv.wood || 0; fellTree(p, treeBase(o) || o); c.stock.wood += (p.inv.wood || 0) - w0; p.inv.wood = w0;
+    if (pixelMap[cx][cy] && isTreePart(pixelMap[cx][cy])) deletePixel(cx, cy);
+    return;
+  }
   if (el === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb && elements[o.element].state !== "liquid") deletePixel(cx, cy); pl.i++; return; }
   if (o && o.element === el) { pl.i++; return; }
   if (o) {
@@ -311,6 +323,8 @@ TASKS.build = function (p, t) {
       // somebody is standing where a block goes: lift them on top of it (foundations) or wait for them to move on
       const b = o.element === "hz_head" ? at(o.x, o.y + 1) : o;
       if (el === "hz_earth" && b && b.id !== undefined && !b.dead) { shift(b, 0, -1) || shift(b, 0, -1, true); if (isPerson(pixelMap[cx][cy])) shift(b, 0, -1); }
+      else if (b && b.id !== undefined && !b.dead && !b.sleeping && b !== p) { const d = b.x >= p.x ? 1 : -1; shift(b, d, 0) || shift(b, -d, 0) || shift(b, d, -1) || shift(b, -d, -1); }   // "excuse me": the worker steps aside
+      else if (b === p) { const d = cx >= pl.x0 + pl.w / 2 ? -1 : 1; tryWalk(p, d, false) || tryWalk(p, -d, false); }   // the builder is in their own way
       if (isPerson(pixelMap[cx][cy])) { t.wait = (t.wait || 0) + 1; if (t.wait > 60) { pl.i++; t.wait = 0; } return; }
     }
   }
@@ -325,7 +339,7 @@ TASKS.build = function (p, t) {
   for (const g in need) if ((c.stock[g] || 0) < need[g]) { pl.state = "stalled"; return "done"; }
   for (const g in need) c.stock[g] -= need[g];
   placeCell(c, pl, cell);
-  pl.i++; p.sk.build += 0.05;
+  pl.i++; p.sk.build += 0.05; (pl.helpers || (pl.helpers = {}))[p.id] = 1;
 };
 
 /* ---- children --------------------------------------------------------------- */
@@ -349,6 +363,8 @@ function pregnancyAndBirths(c) {
             w.kids.push(kid.id); if (sp) sp.kids.push(kid.id);
             c.births++; H2.stats.births++;
             addThought(w, "newborn", 20, DAY * 2); if (sp) addThought(sp, "newborn", 20, DAY * 2);
+            life(kid, "Born in " + c.name + " to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", "birth");
+            life(w, "Gave birth to " + kid.first + ".", "child"); if (sp) life(sp, "Became a parent of " + kid.first + ".", "child");
             chronicle("A child, " + kid.first + " " + kid.sn + ", was born to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", true, w.fac);
           }
         }
@@ -360,7 +376,7 @@ function pregnancyAndBirths(c) {
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
     if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
-    if (c.beds < c.pop + 0 || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
+    if (c.beds * 2 < c.pop || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }

@@ -80,6 +80,17 @@ function chronicle(text, major, fac) {
   try { H2.refreshChronicle && H2.refreshChronicle(); } catch (err) {}
 }
 H2.chronicle = chronicle;
+// life history: every person keeps a short list of the notable moments of their life (shown in the inspector card)
+const LIFE_MAX = 40;
+function life(p, text, k) {
+  if (!p || p.id === undefined) return;
+  const l = p.life || (p.life = []);
+  const e = { t: pixelTicks, day: dayNumber(), text: text, k: k || "" };
+  if (l.length >= LIFE_MAX) { const i = l.findIndex((q, j) => j > 0 && !q.big); l.splice(i > 0 ? i : 1, 1); }
+  if (k === "birth" || k === "elected" || k === "hero" || k === "death" || k === "found") e.big = 1;
+  l.push(e);
+}
+H2.life = life;
 const nm = (p) => p ? (p.title ? p.title + " " : "") + (p.name || "Someone") : "Someone";
 H2.nm = nm;
 

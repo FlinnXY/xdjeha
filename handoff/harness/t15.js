@@ -9,6 +9,6 @@ const {setup,terrain}=require('./sim');
    console.log(w.pixelTicks, line);
    while(shown<w.H2.chron.length){ const e=w.H2.chron[shown++]; if(e.major) console.log('   *',e.text); }
  }
- console.log('ERR',r.errors.filter(e=>!/style.css|adsbygoogle/.test(e)).slice(0,6));
+ console.log('LASTERR', w.H2.lastError ? String(w.H2.lastError.stack).slice(0,400) : null); console.log('ERR',r.errors.filter(e=>!/style.css|adsbygoogle/.test(e)).slice(0,6));
  process.exit(0);
 })();

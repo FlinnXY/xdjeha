@@ -80,6 +80,17 @@ function chronicle(text, major, fac) {
   try { H2.refreshChronicle && H2.refreshChronicle(); } catch (err) {}
 }
 H2.chronicle = chronicle;
+// life history: every person keeps a short list of the notable moments of their life (shown in the inspector card)
+const LIFE_MAX = 40;
+function life(p, text, k) {
+  if (!p || p.id === undefined) return;
+  const l = p.life || (p.life = []);
+  const e = { t: pixelTicks, day: dayNumber(), text: text, k: k || "" };
+  if (l.length >= LIFE_MAX) { const i = l.findIndex((q, j) => j > 0 && !q.big); l.splice(i > 0 ? i : 1, 1); }
+  if (k === "birth" || k === "elected" || k === "hero" || k === "death" || k === "found") e.big = 1;
+  l.push(e);
+}
+H2.life = life;
 const nm = (p) => p ? (p.title ? p.title + " " : "") + (p.name || "Someone") : "Someone";
 H2.nm = nm;
 
@@ -391,6 +402,7 @@ function spawnPerson(x, y, fac, o) {  // x,y = body cell; head at y-1
   if (h) { h.color = b.skin; h.fac = fac; }
   b.col = o.col || colonyFor(fac, x, y).id;
   const c = colById(b.col); if (c) c.pop = (c.pop || 0) + 1;
+  if (!o.born) life(b, "Arrived " + (c ? "at " + c.name : "in the land") + " as a " + (o.job || "settler") + ".", "found");
   return b;
 }
 function spawnChild(x, y, fac, o) {
@@ -415,6 +427,7 @@ function growUp(p) {
   const h = at(p.x, p.y - 1); if (!h) return false;
   h.color = color; h.fac = p.fac;
   changePixel(p, "hz_body", false);
+  life(p, "Came of age and joined the adults of " + ((colById(p.col) || {}).name || "the village") + ".", "age");
   p.color = bodyColor(p);
   chronicle(p.first + " " + p.sn + " came of age.", false, p.fac);
   return true;
@@ -530,6 +543,7 @@ function tryWalk(p, dx, reckless) {
   }
   if (shift(p, dx, 0) || shift(p, dx, -1) || shift(p, dx, 0, true) || shift(p, dx, -1, true)) { p.dir = dx; return true; }
   if (climb(p, dx)) { p.dir = dx; return true; }
+  if (shift(p, dx, 1)) { p.dir = dx; return true; }          // step down diagonally (off furniture, through a low door)
   return false;
 }
 // scramble up a ledge two cells high (slowly). Needs head room above the person and free space on the ledge.
@@ -576,15 +590,99 @@ function stairRoute(p, tx, ty) {
   return null;
 }
 H2.stairRoute = stairRoute;
+
+/* ---- path finding -------------------------------------------------------------
+   A breadth-first search over the cells a person can stand in (body + head free, something to stand on).
+   Moves: walk, step up one cell (with head room), climb a two-cell ledge, drop down up to four cells.
+   People are treated as passable (friends slip past each other). The result is only used to pick the
+   walking direction; the actual steps are still taken by tryWalk/shift. Paths are cached per target and
+   a small per-tick budget keeps hundreds of villagers cheap. */
+const PF = { budget: 0, tick: -1, MAXN: 9000 };
+function pfPass(x, y, p) {
+  if (x < 0 || x > width || y < 0 || y > height) return false;
+  const o = pixelMap[x][y];
+  if (!o || isPerson(o) || isSoft(o)) return true;
+  const k = kindOf(o);
+  if (k === 1) return true;
+  if (k === 3) { const e = elements[o.element]; if (e && (e.pass || e.stair)) return true; return o.element === "hz_gate" ? (o.fac === undefined || o.fac === p.fac) : (o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || !!H2.truce); }
+  return false;
+}
+function pfSupport(x, y) {
+  if (y + 1 > height) return true;
+  const o = pixelMap[x][y + 1];
+  if (!o || isPerson(o)) return false;
+  const e = elements[o.element];
+  if (e && e.stair) return true;
+  const k = kindOf(o); return k === 2 || (k === 1 && e && e.state === "liquid");
+}
+function findPath(p, tx, ty, range, vy) {
+  const ch = isChildPx(p);
+  const x0 = Math.max(1, Math.min(p.x, tx) - 30), x1 = Math.min(width - 1, Math.max(p.x, tx) + 30);
+  const W = x1 - x0 + 1, Hh = height + 1;
+  const stand = (x, y) => x >= x0 && x <= x1 && y >= 1 && y < height && pfPass(x, y, p) && (ch || pfPass(x, y - 1, p)) && pfSupport(x, y);
+  const prev = new Int32Array(W * Hh).fill(-2);
+  const idx = (x, y) => (x - x0) * Hh + y;
+  const q = new Int32Array(Math.min(W * Hh, PF.MAXN + 64));
+  let qh = 0, qt = 0;
+  const s = idx(p.x, p.y); prev[s] = -1; q[qt++] = s;
+  let goal = -1, n = 0;
+  while (qh < qt && n++ < PF.MAXN) {
+    const cur = q[qh++]; const cx = Math.floor(cur / Hh) + x0, cy = cur % Hh;
+    if (Math.abs(cx - tx) <= range && Math.abs(cy - ty) <= vy) { goal = cur; break; }
+    for (const dx of (tx >= cx ? [1, -1] : [-1, 1])) {
+      const nx = cx + dx; if (nx < x0 || nx > x1) continue;
+      const tryN = (ny) => { if (qt >= q.length) return; const k = idx(nx, ny); if (prev[k] !== -2) return; prev[k] = cur; q[qt++] = k; };
+      if (stand(nx, cy)) { tryN(cy); continue; }
+      // step up (needs head room above our own head)
+      if (stand(nx, cy - 1) && (ch ? pfPass(cx, cy - 1, p) : pfPass(cx, cy - 2, p))) { tryN(cy - 1); continue; }
+      // climb a two-cell ledge
+      if (!ch && stand(nx, cy - 2) && pfPass(cx, cy - 2, p) && pfPass(cx, cy - 3, p)) { tryN(cy - 2); continue; }
+      // step down diagonally (head passes where the body was level)
+      if (pfPass(nx, cy, p) && stand(nx, cy + 1) && !(stand(nx, cy))) tryN(cy + 1);
+      // drop down
+      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 4; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+    }
+  }
+  if (goal < 0) return null;
+  const pts = []; let c = goal;
+  while (c >= 0) { pts.push({ x: Math.floor(c / Hh) + x0, y: c % Hh }); c = prev[c]; }
+  pts.reverse();
+  return pts;
+}
+H2.findPath = findPath;
+// direction to walk according to the cached path (null when there is no usable path)
+function pathDir(p, tx, ty, range, vy) {
+  let P = p.path;
+  if (P && (Math.abs(P.tx - tx) > 2 || Math.abs(P.ty - ty) > 2 || pixelTicks - P.t > 400)) P = p.path = null;
+  if (P && P.pts) {
+    // where are we on the path? (look a few nodes ahead, people get swapped around a bit)
+    let i = -1;
+    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
+    if (i >= 0) { P.i = i; const nx = P.pts[i + 1]; return nx ? (Math.sign(nx.x - p.x) || p.dir || 1) : 0; }
+    P = p.path = null;     // knocked off the path: plan again
+  }
+  if (P && !P.pts && pixelTicks - P.t < 60) return null;          // recently found no path: keep the old behaviour for a while
+  if (pixelTicks - (p.pathT || -99) < 8) return null;
+  if (PF.tick !== pixelTicks) { PF.tick = pixelTicks; PF.budget = 10; }
+  if (PF.budget <= 0) return null;
+  PF.budget--; p.pathT = pixelTicks;
+  const pts = findPath(p, tx, ty, range, vy);
+  p.path = { tx: tx, ty: ty, t: pixelTicks, pts: pts, i: 0 };
+  if (!pts || pts.length < 2) return pts ? 0 : null;
+  return Math.sign(pts[1].x - p.x) || p.dir || 1;
+}
 function goTo(p, tx, ty, range, vy) {
   range = range === undefined ? 1 : range; vy = vy === undefined ? 3 : vy;
   if (Math.abs(tx - p.x) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
+  if ((p.stk || 0) >= 2 && Math.abs(tx - p.x) <= range + 2 && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }   // crowded spot: close enough
   p.tgx = tx; p.tgyy = ty;
-  const via = stairRoute(p, tx, ty);
+  const pd = pathDir(p, tx, ty, range, vy);
+  const via = pd === null ? stairRoute(p, tx, ty) : null;
   p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
+  if (pd !== null && p.path && p.path.pts) { const nx = p.path.pts[p.path.i + 1]; if (nx && nx.y < p.y) p.tgy = nx.y - 2; else if (nx) p.tgy = p.y; }   // stairs are steps only when the path climbs
   if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
-  let dir = Math.sign(dxT);
+  let dir = pd ? pd : Math.sign(dxT);
   if (p.detour > 0) { dir = p.dd; p.detour--; }
   else if (dir === 0) dir = p.dir || 1;
   p.wantDir = dir; p.wantT = pixelTicks;
@@ -594,7 +692,7 @@ function goTo(p, tx, ty, range, vy) {
   else {
     p.stk = (p.stk || 0) + 1;
     if (p.stk > 1 && clearObstacle(p, dir)) { p.stk = 0; p.fails = 0; }
-    else if (p.stk > 4) { p.dd = rnd() < 0.5 ? -dir : dir; if (p.detour > 0 && p.dd === dir) p.dd = -dir; p.detour = rint(5, 14); p.stk = 0; p.fails = (p.fails || 0) + 1; }
+    else if (p.stk > 4) { p.dd = rnd() < 0.5 ? -dir : dir; if (p.detour > 0 && p.dd === dir) p.dd = -dir; p.detour = pd ? rint(1, 4) : rint(5, 14); p.stk = 0; p.fails = (p.fails || 0) + 1; p.path = null; }
     if ((p.fails || 0) > 10) { p.fails = 0; return "fail"; }
   }
   return moved ? "moving" : "blocked";
@@ -644,9 +742,10 @@ function die(p, cause, killer, gone) {
   let who = nm(p) + " (" + age + "d)";
   let msg;
   if (killer && killer.id) {
-    killer.kills = (killer.kills || 0) + 1;
-    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
-    if (killer.kills === 8) { killer.title = "Legendary"; chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
+    killer.kills = (killer.kills || 0) + 1; killer.xp = (killer.xp || 0) + 12;
+    if (killer.fac !== p.fac) life(killer, "Slew " + nm(p) + " of the " + FAC[p.fac].name + "s in battle (kill #" + killer.kills + ").", "kill");
+    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; life(killer, "Hailed a hero after three victories.", "hero"); const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
+    if (killer.kills === 8) { killer.title = "Legendary"; life(killer, "Became a living legend (eight kills).", "hero"); chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
     msg = who + " was slain by " + nm(killer) + ".";
     H2.stats.battles++;
     addThought(killer, "killed", -4, DAY);
@@ -654,6 +753,7 @@ function die(p, cause, killer, gone) {
   } else if (verb) msg = who + " " + verb + ".";
   else msg = who + " met a violent end (" + p.cause + ").";
   chronicle(msg, p.cause !== "old age" && (stageOf(p) !== "elder"), p.fac);
+  life(p, "Died aged " + age + " days — " + (msg.indexOf(who) === 0 ? msg.slice(who.length + 1) : msg), "death");
   if (typeof window.announceDeath === "function" && !gone) { try { window.announceDeath(); } catch (e) {} } // death_count.js compatibility
   // loot
   if (p.coin > 0 && elements.gold_coin && !gone) { for (const d of [[0, 0], [1, 0], [-1, 0], [0, -1]]) { const x = p.x + d[0], y = p.y + d[1]; if (inb(x, y) && !pixelMap[x][y]) { createPixel("gold_coin", x, y); break; } } }
@@ -664,7 +764,7 @@ function die(p, cause, killer, gone) {
   if (!gone) { const h = ch ? null : headOf(p); if (h) { h.dead = pixelTicks; } p.color = "#8a8f8a"; }
 }
 function grieve(p) {
-  if (p.sp) { const s = H2.byId[p.sp]; if (s && !s.dead) { s.sp = 0; addThought(s, "widowed", -35, DAY * 3); chronicle(nm(s) + " is heartbroken at the loss of " + p.first + ".", false, s.fac); } }
+  if (p.sp) { const s = H2.byId[p.sp]; if (s && !s.dead) { s.sp = 0; addThought(s, "widowed", -35, DAY * 3); life(s, "Lost their spouse " + nm(p) + ".", "grief"); chronicle(nm(s) + " is heartbroken at the loss of " + p.first + ".", false, s.fac); } }
   for (const kid of (p.kids || [])) { const k = H2.byId[kid]; if (k && !k.dead) addThought(k, "grief", -20, DAY * 2); }
   for (const pa of (p.par || [])) { if (!pa) continue; const k = H2.byId[pa]; if (k && !k.dead) addThought(k, "grief", -22, DAY * 2); }
   for (const fid in (p.fr || {})) { const k = H2.byId[fid]; if (k && !k.dead && p.fr[fid] > 30) addThought(k, "grief", -12, DAY); }
@@ -760,7 +860,7 @@ function vitals(p) {
   if (p.th <= 0) { dmg += 0.9; cause = "thirst"; }
   if (p.bt < 34) { dmg += (34 - p.bt) * 0.35; cause = "cold"; } else if (p.bt > 39.5) { dmg += (p.bt - 39.5) * 0.5; cause = "heat"; }
   if (p.sub) { p.air -= 4; if (p.air <= 0) { dmg += 6; cause = "drowning"; } } else p.air = clamp(p.air + 10, 0, 100);
-  if (p.burning) { dmg += 3.5; cause = "fire"; p.panic = Math.max(p.panic, 6); }
+  if (p.burning) { dmg += 3.5; cause = "fire"; p.panic = Math.max(p.panic, 6); if (!p.burnStart) p.burnStart = pixelTicks; else if (pixelTicks - p.burnStart > 240 && rnd() < 0.25) { p.burning = false; delete p.burnStart; } }   // stop, drop and roll
   // neighbours: hazards / diseases
   for (let i = 0; i < 4; i++) {
     const nx = p.x + (i === 0 ? -1 : i === 1 ? 1 : 0), ny = p.y + (i === 2 ? 1 : i === 3 ? -1 : 0);
@@ -952,8 +1052,8 @@ function drinkSource(p) {
 }
 TASKS.drink = function (p, t) {
   if (!t.src || (t.src.px && t.src.px.del)) { t.src = drinkSource(p); if (!t.src) { t.nofind = (t.nofind || 0) + 1; if (t.nofind > 15) return "fail"; return TASKS.wander(p, t); } }
-  const r = goTo(p, t.src.x, t.src.y, 1, 3);
-  if (r === "fail") { markBad(p, t.src.x, t.src.y); t.src = null; return; }
+  const r = goTo(p, t.src.x, t.src.y, t.src.well ? 2 : 1, 3);
+  if (r === "fail") { t.fl = (t.fl || 0) + 1; if (!t.src.well || t.fl > 2) markBad(p, t.src.x, t.src.y); t.src = null; return; }
   if (r === "arrive") {
     t.n = (t.n || 0) + 1;
     if (t.n % 3 === 0) { p.th = Math.min(100, p.th + 18); if (!t.src.well && rnd() < 0.15 && t.src.px && !t.src.px.del) deletePixel(t.src.px.x, t.src.px.y); }
@@ -1093,13 +1193,19 @@ function partyFor(fac) {
     onPlace: function (pixel) {
       const px = pixel.x, py = pixel.y; deletePixel(px, py);
       const jobs = ["builder", "woodcutter", "farmer", "miner", "soldier", "laborer"];
-      let made = 0, col = null;
+      let made = 0, col = null; const band = [];
       for (let i = 0; i < 6; i++) {
         const x = clamp(px + (i - 3) * 3 + rint(-1, 1), 1, width - 2);
         const gy = groundY(x, clamp(py - 8, 0, height - 3), 40);
         if (gy < 2) continue;
-        const b = spawnPerson(x, gy, fac, { job: jobs[i], age: rint(CHILD_T + DAY * 3, DAY * 12) });
-        if (b) { made++; col = colById(b.col); if (b.job === "soldier") b.wpn = "spear"; if (b.job === "soldier") b.color = bodyColor(b); }
+        const b = spawnPerson(x, gy, fac, { job: jobs[i], age: rint(CHILD_T + DAY * 3, DAY * 12), sex: i < 4 ? (i % 2 ? "f" : "m") : undefined });
+        if (b) { made++; band.push(b); col = colById(b.col); if (b.job === "soldier") b.wpn = "spear"; if (b.job === "soldier") b.color = bodyColor(b); }
+      }
+      // two founding couples travel with the band
+      for (let i = 0; i + 1 < band.length && i < 4; i += 2) {
+        const m = band[i], w = band[i + 1]; if (m.sex === w.sex || m.sp || w.sp) continue;
+        m.sp = w.id; w.sp = m.id; w.sn = m.sn; w.name = w.first + " " + w.sn; m.fr[w.id] = 70; w.fr[m.id] = 70;
+        life(m, "Set out with their spouse " + w.first + ".", "marry"); life(w, "Set out with their spouse " + m.first + ".", "marry");
       }
       if (made && col) { chronicle(made + " " + FAC[fac].name + " settlers arrive and look for a place to build a home.", true, fac); col.stock.wood += 15; }
     },
@@ -1291,6 +1397,7 @@ function score(p, j) {
 function setJob(p, j) {
   if (p.job === j) return;
   const old = p.job; p.job = j; p.task = null;
+  if (j !== "laborer" && !(p.jobsHad || (p.jobsHad = [])).includes(j)) { p.jobsHad.push(j); life(p, "Took up work as a " + j + ".", "job"); }
   if (j === "soldier" || j === "sentry") { if (!p.wpn) p.wpn = "spear"; p.color = bodyColor(p); }
   else if (old === "soldier" || old === "sentry") { p.color = bodyColor(p); }
   else if (j === "doctor" || old === "doctor") p.color = bodyColor(p);
@@ -1299,6 +1406,7 @@ function setJob(p, j) {
 H2.setJob = setJob;
 
 /* ---- colony think loop ---------------------------------------------------- */
+H2.colonyHooks = H2.colonyHooks || [];   // extra per-colony systems (army, trade, events) register here
 function colonyThink(c) {
   if (c.pop <= 0) {
     c.empty = (c.empty || 0) + 1;
@@ -1312,6 +1420,7 @@ function colonyThink(c) {
   if (H2.planBuild) H2.planBuild(c);
   if (H2.cfg.expand) tryExpand(c);
   if (H2.warThinkColony && H2.cfg.war) H2.warThinkColony(c);
+  for (const hk of H2.colonyHooks) { try { hk(c); } catch (e) { H2.lastError = e; if (H2.cfg.verbose) console.error("[Humanitize2]", e); } }
   burials(c);
 }
 function runColonies() {
@@ -1384,7 +1493,7 @@ function tryExpand(c) {
     for (const b of (H2.st.bed || [])) if (b.owner === p.id) { b.owner = 0; b.ownerName = ""; }
     if (!isChildPx(p) && p.job !== "laborer") setJob(p, "laborer");
     setTask(p, "migrate", { x: site.x, y: site.y }, 70);
-    addThought(p, "pioneer", 10, DAY);
+    addThought(p, "pioneer", 10, DAY); life(p, "Left " + c.name + " as a pioneer to found " + nc.name + ".", "found");
   }
   chronicle(chosen.size + " settlers leave " + c.name + " to found " + nc.name + ".", true, c.fac);
   census(true);
@@ -1534,7 +1643,8 @@ function groveSpot(p, c) {
   const side0 = c.groveSide || (c.groveSide = (c.x < width / 2 ? -1 : 1) * (rnd() < 0.7 ? 1 : -1));
   for (let tries = 0; tries < 16; tries++) {
     const side = tries < 10 ? side0 : -side0;
-    const x = clamp(Math.round(c.x + side * rint(20, 48)), 2, width - 3);
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;      // never inside the town's growing edge
+    const x = clamp(Math.round(c.x + side * rint(Math.max(24, e), Math.max(52, e + 28))), 2, width - 3);
     if (isBad(p, x, 0)) continue;
     const gy = groundY(x, clamp(c.y - 14, 0, height - 2), 30);
     if (gy < 8) continue;
@@ -1564,8 +1674,9 @@ TASKS.plant_trees = function (p, t) {
 const STONY = { rock: 1, gravel: 1, basalt: 1, granite: 1, limestone: 1, slate: 1, marble: 1, sandstone: 1, tuff: 1, quartz: 1, rock_wall: 1, packed_sand: 0, iron_ore: 1, ore: 1, raw_iron: 1, cobblestone: 1 };
 const isStony = (o) => !!o && STONY[o.element] === 1 && !o.hzb2;
 const DIGGABLE = (o) => !!o && !isPerson(o) && !elements[o.element].hzb && !elements[o.element].fdn && (groundish(o) || isStony(o) || isSoft(o) || o.element === "plant" || o.element === "hz_crop" || o.element === "hz_sapling");
+const BRICKY = { dirt: 1, mud: 1, clay: 1, clay_soil: 1, hz_earth: 1, sand: 1, packed_sand: 1, gravel: 1 };
 function mineYield(p, o, c) {
-  if (!isStony(o)) return;
+  if (!isStony(o)) { if (BRICKY[o.element]) { p.inv.stone = (p.inv.stone || 0) + 0.5; p.sk.mine += 0.3; } return; }   // earth is fired into bricks
   p.inv.stone = (p.inv.stone || 0) + 1; p.sk.mine++;
   const deep = clamp((o.y - (c ? c.y : o.y)) / 10, 0, 1);
   if (rnd() < 0.08 + deep * 0.12 || o.element === "iron_ore" || o.element === "raw_iron") p.inv.iron = (p.inv.iron || 0) + 1;
@@ -1578,8 +1689,9 @@ function exposedRock(p, c) {
 function planQuarry(c) {
   const order = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
-    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // always outside the built-up town
-    for (let d = Math.max(16, e); d <= Math.max(54, e + 28); d += 4) order.push(c.x + side * d);
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;         // always well outside the built-up town (room to grow)
+    for (let d = Math.max(28, e); d <= Math.max(60, e + 30); d += 4) order.push(c.x + side * d);
+    for (let d = Math.max(28, e) - 6; d >= 18; d -= 4) order.push(c.x + side * d);    // cramped land: closer is better than nothing
   }
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
@@ -2013,6 +2125,7 @@ function marry(a, b) {
   addThought(a, "wedding", 25, DAY * 3); addThought(b, "wedding", 25, DAY * 3);
   const c = colById(a.col); if (c && !c.festival) { c.festival = pixelTicks + 600; }
   chronicle(nm(m) + " and " + nm(f) + " were married!", true, a.fac);
+  life(m, "Married " + nm(f) + ".", "marry"); life(f, "Married " + nm(m) + ".", "marry");
 }
 H2.marry = marry;
 
@@ -2075,12 +2188,18 @@ H2.costOfPlan = costOfPlan;
 function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) return false; return true; }
 
 /* ---- site finding ---------------------------------------------------------- */
+const CLEARABLE = { wood: 1, tree_branch: 1, plant: 1, hz_sapling: 1, sapling: 1, dead_plant: 1, vine: 1 };
 function columnGround(x) { // y of free cell above the topmost solid thing, only if that is real ground
   if (x < 1 || x >= width - 1) return -1;
   for (let y = 0; y < height - 1; y++) {
-    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop") continue;   // decor and crops make way for buildings
+    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop" || CLEARABLE[o.element]) continue;   // decor, crops and trees make way for buildings
     if (isSoft(o) && (o.element !== "grass" || o.h > 0 || isSoft(pixelMap[x][y + 1]))) continue;  // grass blades / flowers are not ground
     if (elements[o.element] && elements[o.element].state === "gas") continue;
+    if (elements[o.element] && elements[o.element].state === "liquid") {          // blood and shallow puddles are mopped up; lakes are not ground
+      let d = 1; while (d <= 2 && pixelMap[x][y + d] && elements[pixelMap[x][y + d].element].state === "liquid") d++;
+      if (d <= 2 && groundish(pixelMap[x][y + d])) continue;
+      return -1;
+    }
     return groundish(o) ? y - 1 : -1;
   }
   return -1;
@@ -2245,6 +2364,7 @@ H2.planHouse = planHouse;
 H2.planBuild = planBuild;
 function completePlan(c, pl) {
   c.built[pl.type] = (c.built[pl.type] || 0) + 1;
+  if (pl.helpers && !DECOR[pl.type]) for (const id in pl.helpers) { const q = H2.byId[id]; if (q && !q.dead) { q.builtN = (q.builtN || 0) + 1; life(q, "Helped build " + (BUILD_NAMES[pl.type] || "a " + pl.type) + " in " + c.name + ".", "build"); } }
   if (!DECOR[pl.type] && pl.type !== "moat" && pl.type !== "cannon") c.ext = c.ext ? [Math.min(c.ext[0], pl.x0), Math.max(c.ext[1], pl.x1)] : [pl.x0, pl.x1];
   if (MAJOR_BUILD[pl.type]) {
     let msg = c.name + " completes " + BUILD_NAMES[pl.type] + ".";
@@ -2321,6 +2441,11 @@ TASKS.build = function (p, t) {
   p.buildCool = pixelTicks + (QUICK[el] ? 2 : Math.max(3, Math.round(6 - (p.sk.build || 0) * 0.6)));
   // is the cell already done?
   const o = pixelMap[cx][cy];
+  if (o && isTreePart(o) && !o.hzb2) {                                                         // a tree on the site: fell it whole, the wood goes to the store
+    const w0 = p.inv.wood || 0; fellTree(p, treeBase(o) || o); c.stock.wood += (p.inv.wood || 0) - w0; p.inv.wood = w0;
+    if (pixelMap[cx][cy] && isTreePart(pixelMap[cx][cy])) deletePixel(cx, cy);
+    return;
+  }
   if (el === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb && elements[o.element].state !== "liquid") deletePixel(cx, cy); pl.i++; return; }
   if (o && o.element === el) { pl.i++; return; }
   if (o) {
@@ -2328,6 +2453,8 @@ TASKS.build = function (p, t) {
       // somebody is standing where a block goes: lift them on top of it (foundations) or wait for them to move on
       const b = o.element === "hz_head" ? at(o.x, o.y + 1) : o;
       if (el === "hz_earth" && b && b.id !== undefined && !b.dead) { shift(b, 0, -1) || shift(b, 0, -1, true); if (isPerson(pixelMap[cx][cy])) shift(b, 0, -1); }
+      else if (b && b.id !== undefined && !b.dead && !b.sleeping && b !== p) { const d = b.x >= p.x ? 1 : -1; shift(b, d, 0) || shift(b, -d, 0) || shift(b, d, -1) || shift(b, -d, -1); }   // "excuse me": the worker steps aside
+      else if (b === p) { const d = cx >= pl.x0 + pl.w / 2 ? -1 : 1; tryWalk(p, d, false) || tryWalk(p, -d, false); }   // the builder is in their own way
       if (isPerson(pixelMap[cx][cy])) { t.wait = (t.wait || 0) + 1; if (t.wait > 60) { pl.i++; t.wait = 0; } return; }
     }
   }
@@ -2342,7 +2469,7 @@ TASKS.build = function (p, t) {
   for (const g in need) if ((c.stock[g] || 0) < need[g]) { pl.state = "stalled"; return "done"; }
   for (const g in need) c.stock[g] -= need[g];
   placeCell(c, pl, cell);
-  pl.i++; p.sk.build += 0.05;
+  pl.i++; p.sk.build += 0.05; (pl.helpers || (pl.helpers = {}))[p.id] = 1;
 };
 
 /* ---- children --------------------------------------------------------------- */
@@ -2366,6 +2493,8 @@ function pregnancyAndBirths(c) {
             w.kids.push(kid.id); if (sp) sp.kids.push(kid.id);
             c.births++; H2.stats.births++;
             addThought(w, "newborn", 20, DAY * 2); if (sp) addThought(sp, "newborn", 20, DAY * 2);
+            life(kid, "Born in " + c.name + " to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", "birth");
+            life(w, "Gave birth to " + kid.first + ".", "child"); if (sp) life(sp, "Became a parent of " + kid.first + ".", "child");
             chronicle("A child, " + kid.first + " " + kid.sn + ", was born to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", true, w.fac);
           }
         }
@@ -2377,7 +2506,7 @@ function pregnancyAndBirths(c) {
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
     if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
-    if (c.beds < c.pop + 0 || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
+    if (c.beds * 2 < c.pop || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }
@@ -2879,14 +3008,14 @@ function damageBlock(o, dmg) {
 H2.damageBlock = damageBlock;
 
 /* ---- projectiles --------------------------------------------------------------- */
-function launch(kind, x, y, tx, ty, fac, owner, power) {
+function launch(kind, x, y, tx, ty, fac, owner, power, fire) {
   if (!inb(x, y) || pixelMap[x][y]) return false;
   const el = kind === "ball" ? "hz_ball" : "hz_arrow";
   const speed = kind === "ball" ? 1.7 : 1.5, g = kind === "ball" ? 0.04 : 0.035;
   const dx = tx - x, dy = ty - y; const t = Math.max(4, Math.abs(dx) / speed);
   createPixel(el, x, y); const pr = pixelMap[x][y]; if (!pr || pr.element !== el) return false;
   pr.fx = x; pr.fy = y; pr.vx = (dx >= 0 ? 1 : -1) * Math.min(speed, Math.abs(dx) / t * 1); pr.vx = dx / t; pr.vy = (dy - 0.5 * g * t * t) / t; pr.g = g;
-  pr.fac = fac; pr.owner = owner; pr.dmg = power; pr.life = 160; pr.born = pixelTicks;
+  pr.fac = fac; pr.owner = owner; pr.dmg = power; pr.life = 160; pr.born = pixelTicks; if (fire) { pr.fire = 1; pr.color = "#ff8a2a"; }
   return true;
 }
 H2.launch = launch;
@@ -2901,10 +3030,10 @@ function projectileTick(p, kind) {
     const o = pixelMap[nx][ny];
     if (o && !o.del) {
       if (kind === "arrow") {
-        if (isPerson(o)) { const tgt = o.element === "hz_head" ? at(o.x, o.y + 1) : o; if (tgt && tgt.fac !== p.fac && tgt.hp !== undefined && !tgt.dead) { hurt(tgt, p.dmg * (1 - 0.22 * (tgt.arm || 0)) * (o.element === "hz_head" ? 1.6 : 1), "arrow", H2.byId[p.owner]); deletePixel(p.x, p.y); return; } else continue; }
+        if (isPerson(o)) { const tgt = o.element === "hz_head" ? at(o.x, o.y + 1) : o; if (tgt && tgt.fac !== p.fac && tgt.hp !== undefined && !tgt.dead) { hurt(tgt, p.dmg * (1 - 0.22 * (tgt.arm || 0)) * (o.element === "hz_head" ? 1.6 : 1), "arrow", H2.byId[p.owner]); if (p.fire && rnd() < 0.3 && !tgt.dead) tgt.burning = true; deletePixel(p.x, p.y); return; } else continue; }
         const e = elements[o.element];
         if (e && e.hzb && o.fac !== undefined && o.fac !== p.fac) damageBlock(o, 1);
-        if (kindOf(o) === 2) { deletePixel(p.x, p.y); return; }
+        if (kindOf(o) === 2) { const ax = p.x, ay = p.y, fire = p.fire && o.fac !== undefined && o.fac !== p.fac; deletePixel(p.x, p.y); if (fire && rnd() < 0.5 && elements.fire && isEmpty(ax, ay)) createPixel("fire", ax, ay); return; }
       } else {
         if (isPerson(o) && (o.fac === p.fac || o.dead)) continue;
         if (kindOf(o) !== 1) { ballImpact(p, nx, ny); return; }
@@ -2982,6 +3111,7 @@ function lovePangs(q) {
   if (rnd() < 0.5 && q.id < l.id) { // defect for love
     const nc = colById(l.col); if (!nc) return;
     chronicle(nm(q) + " abandons the " + FAC[q.fac].name + " cause to be with " + nm(l) + "! A traitor — or a lover?", true, q.fac);
+    life(q, "Defected to the " + FAC[l.fac].name + "s for love of " + nm(l) + ".", "defect");
     q.fac = l.fac; q.col = nc.id; q.defected = true; q.job = "laborer"; q.color = bodyColor(q); q.task = null; q.sp = l.id; l.sp = q.id; q.lover = 0; l.lover = 0;
     const h = headOf(q); if (h) h.fac = q.fac;
     marry(q, l);
@@ -3087,7 +3217,7 @@ TASKS.envoy = function (p, t) {
         c.tensionPts = Math.max(0, c.tensionPts - 28); rc.tensionPts = Math.max(0, rc.tensionPts - 28);
         c.stock.coin = Math.max(0, c.stock.coin - 10); rc.stock.coin += 10;
         chronicle("PEACE ENVOY: " + nm(p) + " of " + c.name + " is received by " + rc.name + ". Tensions ease between the " + FAC[c.fac].name + "s and the " + FAC[rc.fac].name + "s.", true, c.fac);
-        addThought(p, "diplomat", 15, DAY * 2);
+        addThought(p, "diplomat", 15, DAY * 2); life(p, "Brokered peace with " + rc.name + " as an envoy.", "envoy");
       }
       t.phase = 1;
     }
@@ -3144,8 +3274,8 @@ TASKS.fight = function (p, t) {
         p.cool = pixelTicks + cd;
         if (p.wpn === "rifle" && elements.left_bullet && rnd() < 0.5) {
           const bx = p.x + Math.sign(dx), by = p.y - 1; if (isEmpty(bx, by)) createPixel(dx > 0 ? "right_bullet" : "left_bullet", bx, by);
-          else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01));
-        } else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01));
+          else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p));
+        } else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p));
         p.sk.fight += 0.03;
       }
       if (d < 6) tryWalk(p, -Math.sign(dx), true);       // kite
@@ -3211,6 +3341,7 @@ TASKS.scout = function (p, t) {
   if (r === "arrive" || r === "fail" || pixelTicks - t.t1 > 3500) {
     I.reports = (I.reports || 0) + 1; I.last = pixelTicks;
     const e = estimateEnemy(c);
+    life(p, "Scouted the enemy and reported back to " + c.name + ".", "scout"); p.xp = (p.xp || 0) + 3;
     if (E.known) chronicle(nm(p) + " returns to " + c.name + " and reports: ~" + Math.round(e.sold) + " soldiers" + (E.cannons ? ", " + Math.round(E.cannons) + " cannons" : "") + (E.walls > 4 ? ", walls" : "") + (E.towers ? ", towers" : "") + ".", true, c.fac);
     else chronicle(nm(p) + " returns with little news; the strangers' home remains unknown.", false, c.fac);
     c.tensionPts += 3; return "done";
@@ -3287,7 +3418,8 @@ TASKS.post = function (p, t) {
   if (H2.war.on && pixelTicks >= (p.cool || 0)) {
     let best = null, bd = 1e9;
     for (const q of H2.people) { if (q.fac === p.fac || q.dead) continue; const dx = Math.abs(q.x - po.x); if (dx > 40 || Math.abs(q.y - po.y) > 34) continue; if (dx < bd) { bd = dx; best = q; } }
-    if (best) { p.cool = pixelTicks + 34; launch("arrow", po.x, po.y - 1, best.x, best.y - 1, p.fac, p.id, 6 * (1 + p.sk.fight * 0.01)); p.sk.fight += 0.04; }
+    if (best) { p.cool = pixelTicks + 34; launch("arrow", po.x, po.y - 1, best.x, best.y - 1, p.fac, p.id, 6 * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p)); p.sk.fight += 0.04; p.xp = (p.xp || 0) + 0.2;
+      if (H2.dropRock) H2.dropRock(p, po, best); }
   }
 };
 TASKS.load = function (p, t) {
@@ -3391,6 +3523,1868 @@ H2.warPlan = function (c, can) {
     if (otherWall && towersN < 3 && !has("tower") && can("tower", 0.7)) { if (queuePlan(c, "tower", { cx: otherWall.x0 + side * 6, range: 8, side: side, outside: true })) return true; }
   }
   return false;
+};
+
+/* ======================================================================
+   ARMY & GOVERNMENT: leaders and elections, ranks and squads, morale,
+   strategy and tactics, soldier life (pay, medals, retirement, funerals),
+   extra weapons (fire arrows, sapper charges, dropped rocks), militia,
+   shelter and fire-fighting.
+   ====================================================================== */
+const RANKS = {
+  0: ["Recruit", "Huscarl", "Veteran", "Sergeant", "Captain", "Marshal"],
+  1: ["Tiro", "Legionary", "Veteran", "Optio", "Centurion", "Legate"],
+};
+const RANK_XP = [0, 12, 40, 80, 140];                  // the top rank is only given by appointment
+const LEADER_TITLE = { 0: ["Chieftain", "High Jarl"], 1: ["Consul", "Doge"] };
+const SQUAD_NAMES = {
+  0: ["Wolves", "Ravens", "Bears", "Stags", "Hawks", "Boars", "Elks", "Lynxes", "Otters", "Falcons"],
+  1: ["I Cohort", "II Cohort", "III Cohort", "IV Cohort", "V Cohort", "VI Cohort", "VII Cohort", "VIII Cohort", "IX Cohort", "X Cohort"],
+};
+const STRATEGY_TEXT = {
+  drill: "drilling in peacetime", hold: "holding the walls", assault: "a full assault", raid: "a lightning raid for plunder",
+  siege: "a patient siege with guns", harass: "harassing with archers", sally: "a sally against the attackers",
+  militia: "arming the townsfolk", shelter: "sheltering the people in the hall",
+};
+function rankName(p) { if (!p || p.rank === undefined) return ""; return (RANKS[p.fac] || RANKS[0])[p.rank] || ""; }
+H2.rankName = rankName;
+function isMil(p) { return p.job === "soldier" || p.job === "sentry" || p.job === "scout"; }
+function armyOf(c) { return c.army || (c.army = { strategy: "drill", morale: 60, squads: [], medals: 0, paid: 0, lastState: c.war ? c.war.state : "peace" }); }
+H2.armyOf = armyOf;
+
+/* ---- leaders & elections ------------------------------------------------------ */
+function leaderScore(p) {
+  const days = ageOf(p) / DAY;
+  return Math.min(12, days * 0.6) + (p.kills || 0) * 1.5 + (p.builtN || 0) * 0.4 + (p.rank || 0) * 2 + (p.medals || 0) * 2
+    + trait(p, "l") * 6 + trait(p, "k") * 4 + trait(p, "b") * 3 + trait(p, "d") * 3 - trait(p, "g") * 3 + (p.title ? 4 : 0) + (p.sp ? 1 : 0);
+}
+function holdElection(c, why) {
+  const voters = H2.people.filter((q) => q.col === c.id && !q.dead && !isChildPx(q) && stageOf(q) !== "child");
+  if (voters.length < 2) { if (voters[0] && c.leader !== voters[0].id) appoint(c, voters[0], 1, 1, why); return; }
+  const cands = voters.slice().sort((a, b) => leaderScore(b) - leaderScore(a)).slice(0, 3);
+  const votes = new Map(cands.map((q) => [q.id, 0]));
+  for (const v of voters) {
+    let best = null, bs = -1e9;
+    for (const k of cands) {
+      let s = leaderScore(k) + rnd() * 8;
+      if (k.id === v.id) s += 6;                                         // everyone likes themselves a little
+      if (v.sp === k.id) s += 8;
+      if ((v.par || []).includes(k.id) || (k.par || []).includes(v.id) || k.sn === v.sn) s += 4;
+      if (s > bs) { bs = s; best = k; }
+    }
+    votes.set(best.id, votes.get(best.id) + 1);
+  }
+  let win = cands[0], wv = -1; for (const k of cands) if (votes.get(k.id) > wv) { wv = votes.get(k.id); win = k; }
+  appoint(c, win, wv, voters.length, why);
+}
+function appoint(c, p, nv, nt, why) {
+  const prev = H2.byId[c.leader];
+  const title = LEADER_TITLE[c.fac][c.pop >= 40 || H2.cols.filter((x) => x.fac === c.fac).length >= 3 ? 1 : 0];
+  c.leader = p.id; c.leaderTitle = title; c.lastElection = pixelTicks;
+  // the leader's temperament steers the council (aggression towards rivals)
+  c.aggr = clamp(0.3 + trait(p, "h") * 0.35 + trait(p, "b") * 0.15 - trait(p, "k") * 0.25 + rnd() * 0.25, 0.05, 0.95);
+  const stance = c.aggr > 0.6 ? "a hawk who speaks of war" : c.aggr < 0.35 ? "a dove who seeks peace" : "a cautious pragmatist";
+  const again = prev && prev.id === p.id;
+  life(p, (again ? "Re-elected " : "Elected ") + title + " of " + c.name + " (" + nv + " of " + nt + " votes).", "elected");
+  addThought(p, "elected", 20, DAY * 2);
+  chronicle((why === "death" ? "After the death of their leader, " : "") + c.name + (again ? " re-elects " : " elects ") + nm(p) + " as " + title + " — " + stance + " (" + nv + "/" + nt + " votes).", true, c.fac);
+}
+H2.holdElection = holdElection;
+
+/* ---- ranks, squads & the marshal ------------------------------------------------ */
+function organise(c, mil) {
+  const A = armyOf(c);
+  const sold = mil.filter((q) => q.job === "soldier" || q.job === "sentry").sort((a, b) => (b.xp || 0) - (a.xp || 0));
+  // ranks: experience earns a rank, but officers are limited by the size of the army
+  const maxCapt = Math.max(1, Math.floor(sold.length / 10)), maxSgt = Math.max(1, Math.ceil(sold.length / 6));
+  let nCapt = 0, nSgt = 0;
+  for (const q of sold) {
+    let r = 0; for (let i = RANK_XP.length - 1; i >= 0; i--) if ((q.xp || 0) >= RANK_XP[i]) { r = i; break; }
+    if (r >= 4) { if (nCapt < maxCapt) nCapt++; else r = 3; }
+    if (r === 3) { if (nSgt < maxSgt) nSgt++; else r = 2; }
+    if (q.rank === 5 && c.marshal === q.id) r = 5;
+    if (q.rank === undefined) q.rank = 0;
+    if (r > q.rank) { q.rank = r; life(q, "Promoted to " + rankName(q) + ".", "rank"); if (r >= 3) chronicle(nm(q) + " is promoted to " + rankName(q) + ".", false, c.fac); }
+    else if (r < q.rank && q.rank !== 5) q.rank = r;   // officer posts are limited; no life entry for reshuffles
+  }
+  // the marshal / legate: the most experienced officer commands the army
+  const M = H2.byId[c.marshal];
+  if (!M || M.dead || M.col !== c.id || !(M.job === "soldier" || M.job === "sentry")) {
+    if (M && M.rank === 5) M.rank = 4;
+    c.marshal = 0;
+    const best = sold[0];
+    if (best && sold.length >= 3 && (best.xp || 0) >= RANK_XP[2]) {
+      c.marshal = best.id; best.rank = 5;
+      life(best, "Appointed " + rankName(best) + " of the " + FAC[c.fac].name + " army of " + c.name + ".", "rank");
+      chronicle(nm(best) + " is appointed " + rankName(best) + " and takes command of " + c.name + "'s army.", true, c.fac);
+    }
+  }
+  // squads of up to six, grouped by weapon role
+  const names = SQUAD_NAMES[c.fac] || SQUAD_NAMES[0];
+  const groups = { archers: [], musketeers: [], infantry: [] };
+  for (const q of sold) groups[q.wpn === "bow" || (isArcher(q) && q.wpn !== "rifle") ? "archers" : q.wpn === "rifle" ? "musketeers" : "infantry"].push(q);
+  const squads = []; let ni = 0;
+  for (const role in groups) {
+    const g = groups[role];
+    for (let i = 0; i < g.length; i += 6) {
+      const mem = g.slice(i, i + 6); const lead = mem.slice().sort((a, b) => (b.rank || 0) - (a.rank || 0) || (b.xp || 0) - (a.xp || 0))[0];
+      const name = names[ni % names.length] + (ni >= names.length ? " " + (Math.floor(ni / names.length) + 1) : ""); ni++;
+      squads.push({ name: name, role: role, lead: lead.id, members: mem.map((q) => q.id) });
+      for (const q of mem) { if (q.squad !== name) { if (q.squad === undefined) life(q, "Joined the " + name + " (" + role + ").", "squad"); q.squad = name; } }
+    }
+  }
+  A.squads = squads;
+}
+
+/* ---- morale -------------------------------------------------------------------- */
+function updateMorale(c, mil) {
+  const A = armyOf(c);
+  let m = 55;
+  if (H2.byId[c.marshal] && !H2.byId[c.marshal].dead) m += 8;
+  if (H2.byId[c.leader] && !H2.byId[c.leader].dead) m += 4;
+  const ratio = c.estPow > 0 ? (c.ownPow || 0) / c.estPow : 1.5;
+  m += clamp((ratio - 1) * 25, -25, 20);
+  let mood = 0, n = 0; for (const q of mil) { mood += (q.mood || 50); n++; }
+  if (n) m += (mood / n - 50) * 0.3;
+  m += Math.min(10, (A.medals || 0) * 1.5);
+  if (c.stock.coin <= 0 && n) m -= 10;                                   // unpaid soldiers grumble
+  const lost = (A.lost || 0); m -= Math.min(30, lost * 4);
+  A.lost = Math.max(0, lost - 0.15);
+  A.morale = Math.round(clamp(A.morale + (clamp(m, 0, 100) - A.morale) * 0.35, 0, 100));
+  // a beaten army routs
+  if (c.war.state === "attack" && A.morale < 18 && pixelTicks - c.war.since > 500 && !c.war.victory) {
+    chronicle("The morale of the " + FAC[c.fac].name + " army breaks — the soldiers of " + c.name + " flee the field!", true, c.fac);
+    setWarState(c, "retreat");
+  }
+}
+
+/* ---- strategy: the war council ----------------------------------------------------- */
+function chooseStrategy(c) {
+  const A = armyOf(c), st = c.war.state, E = c.intel && c.intel.enemy;
+  const own = c.ownPow || 0, est = c.estPow || 0;
+  let s = A.strategy;
+  if (st === "peace" || st === "wary") s = "drill";
+  else if (st === "fortify") s = "hold";
+  else if (st === "prepare" || (st === "attack" && A.lastState !== "attack" && A.lastState !== "prepare")) {
+    if (E && E.walls > 4 && (c.stock.cannon > 0 || haveCount(c, "cannon") > 0)) s = "siege";
+    else if (own > est * 1.6) s = "assault";
+    else if (c.aggr < 0.5) s = "harass";
+    else s = "raid";
+  } else if (st === "siege") {
+    if (own >= est * 0.9 && est > 0) s = "sally";
+    else if (own < est * 0.6) s = "militia";
+    else if (c.wallL !== undefined || c.wallR !== undefined || haveCount(c, "post") > 0) s = "hold";
+    else s = "shelter";
+  }
+  if (s !== A.strategy) {
+    A.strategy = s;
+    if (st !== "peace" && st !== "wary") chronicle("War council of " + c.name + ": the plan is " + STRATEGY_TEXT[s] + ".", false, c.fac);
+  }
+  // raids and harassment are short: grab what can be grabbed and go home
+  if (st === "attack" && (s === "raid" || s === "harass") && !c.war.victory && pixelTicks - c.war.since > DAY * (s === "raid" ? 1.6 : 1.1)) {
+    const ec = H2.cols.find((x) => x.fac !== c.fac && c.war.target && Math.abs(x.x - c.war.target.x) < 70);
+    if (ec && s === "raid") { const n = Math.min(40, Math.floor(ec.stock.coin * 0.3)); ec.stock.coin -= n; c.stock.coin += n; chronicle("The raiders of " + c.name + " return home with " + n + " plundered coins.", true, c.fac); }
+    else chronicle("Having bloodied the enemy, " + c.name + "'s skirmishers withdraw.", true, c.fac);
+    setWarState(c, "retreat");
+  }
+}
+
+/* ---- soldier life: pay, medals, retirement, funerals -------------------------------- */
+function soldierLife(c, mil) {
+  const A = armyOf(c);
+  const day = dayNumber();
+  if (A.paid !== day) {
+    A.paid = day;
+    for (const q of mil) { if (c.stock.coin >= 1) { c.stock.coin -= 1; q.coin = (q.coin || 0) + 1; } else addThought(q, "unpaid", -8, DAY); }
+  }
+  for (const q of mil) {
+    if (stageOf(q) === "elder" && !q.retired) {
+      q.retired = true; setJob(q, "laborer");
+      life(q, "Retired from the army as " + (rankName(q) || "a soldier") + " with " + (q.medals || 0) + " medal(s) and " + (q.kills || 0) + " kill(s).", "retire");
+      chronicle(nm(q) + " hangs up their weapon and retires from the army with honours.", false, c.fac);
+    }
+  }
+  // funerals for fallen soldiers: their squad mourns
+  for (const r of c.corpses) {
+    const d = H2.byId[r.id]; if (!d || d.mourned || !d.squad) continue;
+    d.mourned = true; A.lost = (A.lost || 0) + 1;
+    for (const q of H2.people) if (!q.dead && q.col === c.id && q.squad === d.squad) { life(q, "Mourned fallen comrade " + nm(d) + ".", "grief"); addThought(q, "comrade", -10, DAY); }
+    if ((d.rank || 0) >= 3 || d.kills >= 3) chronicle(c.name + " holds a funeral with honours for " + (rankName(d) ? rankName(d) + " " : "") + nm(d) + ".", true, c.fac);
+  }
+}
+function awardMedals(c, kind, who) {
+  const A = armyOf(c); let n = 0;
+  for (const q of who) {
+    if (q.dead) continue;
+    q.medals = (q.medals || 0) + 1; q.xp = (q.xp || 0) + 15; n++;
+    life(q, "Awarded the " + kind + ".", "medal");
+  }
+  A.medals = (A.medals || 0) + (n ? 1 : 0);
+  if (n) chronicle(n + " soldier" + (n > 1 ? "s" : "") + " of " + c.name + " receive the " + kind + ".", false, c.fac);
+}
+function stateChanges(c, mil) {
+  const A = armyOf(c), st = c.war.state, old = A.lastState;
+  if (st === old) return;
+  const fighters = mil.filter((q) => q.job === "soldier" || q.job === "sentry");
+  if (old === "attack" && c.war.victory) awardMedals(c, FAC[c.fac].name + " Campaign Medal", fighters);
+  if (old === "siege" && st !== "siege") { awardMedals(c, "Defender's Cross of " + c.name, fighters); chronicle(c.name + " has withstood the attack!", true, c.fac); }
+  if (st === "attack") for (const q of fighters) life(q, "Marched to war against the " + FAC[1 - c.fac].name + "s.", "war");
+  if (st === "siege") for (const q of fighters) life(q, "Defended " + c.name + " against attack.", "war");
+  // militia stands down after the siege
+  if (old === "siege") for (const q of H2.people) if (q.col === c.id && q.militia) { q.militia = false; if (q.wpn === "spear" && q.job !== "soldier") q.wpn = null; }
+  A.lastState = st;
+}
+
+/* ---- the per-colony hook ------------------------------------------------------------ */
+function armyThink(c) {
+  const A = armyOf(c);
+  const L = H2.byId[c.leader];
+  if (!L || L.dead || L.col !== c.id) { if (c.pop >= 1 && (!c.lastElection || pixelTicks - c.lastElection > 200)) holdElection(c, c.leader ? "death" : "first"); }
+  else if (pixelTicks - (c.lastElection || 0) > DAY * 6) holdElection(c, "term");
+  if (!H2.cfg.war) return;
+  const mil = H2.people.filter((q) => q.col === c.id && !q.dead && isMil(q));
+  stateChanges(c, mil);
+  organise(c, mil);
+  chooseStrategy(c);
+  updateMorale(c, mil);
+  soldierLife(c, mil);
+  fireWatch(c);
+}
+H2.colonyHooks.push(armyThink);
+H2.armyThink = armyThink;
+
+/* ---- training earns experience ---------------------------------------------------------- */
+const _train = TASKS.train;
+TASKS.train = function (p, t) {
+  const n0 = t.n || 0; const r = _train(p, t);
+  if ((t.n || 0) > n0 && t.n % 5 === 0) {
+    p.xp = (p.xp || 0) + 0.8;
+    // sparring partners: two soldiers at the same dummy cross blades
+    if (!t.spar && rnd() < 0.05) { const o = H2.people.find((q) => q !== p && q.col === p.col && q.task && q.task.k === "train" && Math.abs(q.x - p.x) <= 3 && Math.abs(q.y - p.y) <= 2); if (o) { t.spar = 1; p.xp += 1.5; o.xp = (o.xp || 0) + 1.5; } }
+    if (!p.trainedOnce) { p.trainedOnce = true; life(p, "Began training at the drill ground.", "train"); }
+  }
+  return r;
+};
+
+/* ---- tactics: siege armies wait for their guns, sallies strike out --------------------- */
+const _march = TASKS.march;
+TASKS.march = function (p, t) {
+  const c = colById(p.col);
+  if (c && c.war.state === "attack" && c.war.target && armyOf(c).strategy === "siege" && pixelTicks - c.war.since < 1100 && pixelTicks >= c.war.launch) {
+    const T = c.war.target, dir = Math.sign(T.x - p.x) || c.war.dir || 1;
+    if (Math.abs(p.x - T.x) < 26 && !(p.id % 3 === 0 && !t.deployed && c.stock.cannon > 0)) { p.dir = dir; return; }   // hold the line while the guns work
+  }
+  return _march(p, t);
+};
+const _defend = TASKS.defend;
+TASKS.defend = function (p, t) {
+  const c = colById(p.col);
+  if (c && armyOf(c).strategy === "sally") { const q = nearestHostile(p, 34); if (q) return setTask(p, "fight", { tid: q.id }, 92) ? "done" : undefined; }
+  return _defend(p, t);
+};
+// sappers: one in five soldiers carries a powder charge to blow a hole in enemy walls
+const _breach = TASKS.breach;
+TASKS.breach = function (p, t) {
+  const c = colById(p.col);
+  if (c && p.id % 5 === 0 && c.stock.powder >= 2 && t.o && !t.o.del && Math.abs(t.o.x - p.x) <= 2 && Math.abs(t.o.y - p.y) <= 6 && pixelTicks > (p.charged || 0)) {
+    c.stock.powder -= 2; p.charged = pixelTicks + 600;
+    const x = t.o.x, y = t.o.y;
+    for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) { const o = at(x + dx, y + dy); if (o && !isPerson(o) && o.fac !== undefined && o.fac !== p.fac) damageBlock(o, 60); }
+    if (typeof explodeAt === "function") { try { explodeAt(x, y, 2, "smoke,smoke,fire"); } catch (e) {} }
+    hurt(p, 6, "explosion");
+    life(p, "Blew a breach in the enemy defences with a powder charge.", "war"); p.xp = (p.xp || 0) + 6;
+    chronicle("A " + FAC[p.fac].name + " sapper blows a breach in the enemy wall!", false, p.fac);
+    t.o = null; return;
+  }
+  return _breach(p, t);
+};
+// defenders on towers drop rocks onto attackers right below
+H2.dropRock = function (p, po, q) {
+  if (!q || Math.abs(q.x - po.x) > 2 || q.y - po.y < 3 || rnd() > 0.35) return;
+  const x = q.x, y = po.y + 1;
+  if (elements.rock && isEmpty(x, y)) createPixel("rock", x, y);
+  hurt(q, 14, "falling rock", p);
+};
+// archers light their arrows in war when the colony has fuel to spare
+H2.fireArrow = function (p) {
+  if (!H2.war.on || !isArcher(p)) return false;
+  const c = colById(p.col); if (!c) return false;
+  const s = armyOf(c).strategy;
+  if (s !== "siege" && s !== "assault" && s !== "hold" && s !== "sally" && s !== "harass") return false;
+  if ((c.stock.wood || 0) < 15) return false;
+  if (rnd() < 0.25) { c.stock.wood -= 0.2; return true; }
+  return false;
+};
+
+/* ---- civilians: militia, shelter, fire-fighting ------------------------------------------- */
+const _warThink = H2.warThink;
+H2.warThink = function (p, col) {
+  const c = col || colById(p.col);
+  if (H2.war.on && c && c.war.state === "siege" && !isMil(p) && !p.envoy && !isChildPx(p)) {
+    const s = armyOf(c).strategy;
+    if (s === "militia" && trait(p, "b") >= 0 && p.hp > 45 && stageOf(p) === "adult") {
+      const e = nearestHostile(p, 14);
+      if (e) { if (!p.militia) { p.militia = true; if (!p.wpn) p.wpn = "spear"; life(p, "Took up a spear to defend " + c.name + " as militia.", "war"); } return setTask(p, "fight", { tid: e.id }, 90); }
+    }
+    if ((s === "shelter" || s === "hold" || s === "militia") && c.hall && !nearestHostile(p, 6) && p.th > 25 && p.hu > 20 && (!p.task || p.task.k !== "shelter")) {
+      return setTask(p, "shelter", { until: pixelTicks + 500 }, 60);
+    }
+  }
+  return _warThink(p, col);
+};
+TASKS.shelter = function (p, t) {
+  const c = colById(p.col); if (!c || !c.hall || c.war.state !== "siege" || pixelTicks > t.until) return "done";
+  const r = goTo(p, c.hall.x + (p.id % 7) - 3, c.hall.y, 3, 6);
+  if (r === "fail") return "done";
+};
+// fires near the village: the nearest able civilians form a bucket line
+function fireWatch(c) {
+  if ((pixelTicks + c.id * 7) % 270 > 90) return;
+  if (!elements.fire) return;
+  const ext = c.ext || [c.x - 12, c.x + 12];
+  const f = H2.findNear(c.x, c.y - 4, Math.round(Math.min(40, Math.max(14, (ext[1] - ext[0]) / 2 + 6))), (o) => o.element === "fire" && inb(o.x, o.y + 1) && !!pixelMap[o.x][o.y + 1] && pixelMap[o.x][o.y + 1].fac === c.fac);
+  if (!f) return;
+  const cand = H2.people.filter((q) => q.col === c.id && !q.dead && !isChildPx(q) && !isMil(q) && !q.sleeping && q.hp > 40 && (!q.task || q.task.k !== "douse")).sort((a, b) => Math.abs(a.x - f.x) - Math.abs(b.x - f.x)).slice(0, 3);
+  for (const q of cand) setTask(q, "douse", { x: f.x, y: f.y, t0: pixelTicks }, 80);
+}
+TASKS.douse = function (p, t) {
+  if (pixelTicks - t.t0 > 700) return "done";
+  const r = goTo(p, t.x, t.y, 2, 4);
+  if (r === "fail") return "done";
+  if (r === "arrive") {
+    let n = 0;
+    for (let dx = -3; dx <= 3; dx++) for (let dy = -3; dy <= 3; dy++) { const o = at(t.x + dx, t.y + dy); if (o && (o.element === "fire" || o.element === "embers")) { deletePixel(o.x, o.y); if (elements.steam && rnd() < 0.3) createPixel("steam", o.x, o.y); n++; } }
+    if (n) { if (!t.credited) { t.credited = 1; life(p, "Helped put out a fire in " + ((colById(p.col) || {}).name || "the village") + ".", "fire"); } }
+    const more = H2.findNear(p.x, p.y, 8, (o) => o.element === "fire");
+    if (more) { t.x = more.x; t.y = more.y; return; }
+    return "done";
+  }
+};
+// handles for tools, events and tests
+H2.spawnPerson = spawnPerson; H2.setWarState = setWarState; H2.declareWar = declareWar; H2.groundY = groundY;
+
+/* ======================================================================
+   TRADE: merchant caravans between settlements
+   ----------------------------------------------------------------------
+   Merchants (job "merchant") run caravans: they load surplus goods from
+   their colony, walk to a partner settlement's market/hall, sell at the
+   partner's prices and buy what their home town lacks, then return and
+   deposit the goods and profits. Frequent trade quietly eases tension
+   between the two factions (trade agreements).
+   Shares the single mod scope with the other parts, so internal helpers
+   (colById, updateEconomy, stationsOf, setTask, goTo, chronicle, life...)
+   are called directly.
+   ====================================================================== */
+
+// goods a caravan can move (bread is tradable here even though it is not a
+// "carry" good counted by the jobs module)
+const TRADE_GOODS = ["wood", "stone", "iron", "grain", "bread", "herbs"];
+const TRADE_CARRY = 10;            // a caravan's load limit
+const TRADE_CD = DAY;              // minimum ticks between a merchant's caravans
+
+H2.trade = { routes: [], pairs: {}, stats: { caravans: 0, sold: 0, bought: 0, coin: 0 } };
+
+// how low a stock can get before the town is "short" of that good (wants to buy)
+function lowT(c, g) {
+  const pop = Math.max(2, c.pop || 2);
+  if (g === "bread") return Math.ceil(pop * 1.5);
+  if (g === "grain") return Math.ceil(pop * 1.2);
+  if (g === "wood") return 16;
+  if (g === "stone") return 10;
+  if (g === "iron") return 3;
+  if (g === "herbs") return 1;
+  return 4;
+}
+// how much a town keeps back (never sells below this)
+function keepT(c, g) {
+  const pop = Math.max(2, c.pop || 2);
+  if (g === "bread") return Math.ceil(pop * 1.4);
+  if (g === "grain") return Math.ceil(pop * 1.1);
+  if (g === "wood") return 18;
+  if (g === "stone") return 10;
+  if (g === "iron") return 3;
+  if (g === "herbs") return 1;
+  return 3;
+}
+function priceOf(c, g) { const p = c.price && c.price[g]; return p !== undefined ? p : (BASE_PRICE[g] || 2); }
+function partnerNeed(o, g) { return o ? Math.max(0, lowT(o, g) - (o.stock[g] || 0)) : 0; }
+
+// the spot where outsiders do business: a market stall, else the hall, else the centre
+function tradeSpot(o) {
+  const m = H2.nearestOf(stationsOf("market", o, 180), o.x, o.y, 400);
+  if (m) return { x: m.x, y: accY(m) };
+  if (o.hall) return { x: o.hall.x, y: o.hall.y };
+  return { x: o.x, y: o.y };
+}
+
+// choose the best settlement to trade with (same faction always; a rival only
+// in peacetime and while relations are not openly hostile)
+function pickPartner(c) {
+  let best = null, bs = 0;
+  for (const o of H2.cols) {
+    if (o === c || o.nomad || (o.pop || 0) <= 0) continue;
+    if (o.fac !== c.fac) {
+      if (H2.war && H2.war.on) continue;
+      if ((c.tension || 0) >= 3 && !H2.truce) continue;
+    }
+    const d = Math.abs(o.x - c.x);
+    if (d < 22) continue;                         // that's basically the same town
+    let sc = 0;
+    for (const g of TRADE_GOODS) {
+      const theirShort = Math.max(0, lowT(o, g) - (o.stock[g] || 0));
+      const ourSurplus = Math.max(0, (c.stock[g] || 0) - keepT(c, g));
+      sc += Math.min(theirShort, ourSurplus) * (BASE_PRICE[g] || 2);           // we can sell
+      const ourShort = Math.max(0, lowT(c, g) - (c.stock[g] || 0));
+      const theirSurplus = Math.max(0, (o.stock[g] || 0) - keepT(o, g));
+      sc += Math.min(ourShort, theirSurplus) * (BASE_PRICE[g] || 2) * 0.8;      // we can buy
+    }
+    sc -= d * 0.05;
+    if (o.fac !== c.fac) sc *= 0.7;               // trading with a rival is riskier / less certain
+    if (sc > bs) { bs = sc; best = o; }
+  }
+  return bs > 6 ? best : null;
+}
+
+/* ---- the merchant's decision -------------------------------------------- */
+H2.shouldTrade = function (p, c) {
+  if (!c || c.nomad) return false;
+  if (p.caravan && p.caravan.active) return true;                 // resume an interrupted caravan
+  if (isNight()) return false;
+  if (c.war && (c.war.state === "siege" || c.war.state === "attack")) return false;
+  if (pixelTicks - (p.lastTrade === undefined ? -TRADE_CD * 2 : p.lastTrade) < TRADE_CD) return false;
+  const tp = pickPartner(c);
+  if (!tp) return false;
+  p._tpid = tp.id;
+  return true;
+};
+
+/* ---- caravan mechanics --------------------------------------------------- */
+function loadCaravan(p, c, o) {
+  let cap = TRADE_CARRY;
+  const order = TRADE_GOODS.slice().sort((a, b) => partnerNeed(o, b) - partnerNeed(o, a));
+  for (const g of order) {
+    if (cap <= 0) break;
+    const surplus = Math.floor(Math.max(0, (c.stock[g] || 0) - keepT(c, g)));
+    if (surplus <= 0) continue;
+    const want = Math.min(surplus, cap, (o ? Math.ceil(partnerNeed(o, g)) : 0) + 3);
+    if (want > 0) { c.stock[g] -= want; p.inv[g] = (p.inv[g] || 0) + want; p.caravan.carried[g] = (p.caravan.carried[g] || 0) + want; cap -= want; }
+  }
+}
+function doTrade(p, c, o, cv) {
+  // sell what we carried
+  for (const g of TRADE_GOODS) {
+    const q = p.inv[g] || 0; if (!q) continue;
+    const price = Math.max(1, priceOf(o, g));
+    const pay = Math.min(q * price, Math.floor(o.stock.coin || 0));
+    const qSold = Math.min(q, Math.floor(pay / price));
+    if (qSold > 0) {
+      o.stock[g] = (o.stock[g] || 0) + qSold; o.stock.coin -= qSold * price;
+      p.inv[g] -= qSold; p.coin += qSold * price; cv.coin += qSold * price; cv.sold += qSold;
+    }
+  }
+  // buy what our home is short of
+  for (const g of TRADE_GOODS) {
+    const ourShort = Math.max(0, Math.ceil(lowT(c, g) - (c.stock[g] || 0)));
+    if (ourShort <= 0) continue;
+    const theirSurplus = Math.floor(Math.max(0, (o.stock[g] || 0) - keepT(o, g)));
+    if (theirSurplus <= 0) continue;
+    const price = Math.max(1, priceOf(o, g));
+    const qty = Math.min(ourShort, theirSurplus, Math.floor(p.coin / price), TRADE_CARRY);
+    if (qty > 0) {
+      o.stock[g] -= qty; o.stock.coin += qty * price;
+      p.coin -= qty * price; p.inv[g] = (p.inv[g] || 0) + qty; cv.bought += qty;
+    }
+  }
+  try { updateEconomy(o); updateEconomy(c); } catch (e) {}
+  // trade eases tension on both sides
+  o.tensionPts = Math.max(0, (o.tensionPts || 0) - 2);
+  c.tensionPts = Math.max(0, (c.tensionPts || 0) - 2);
+  recordAgreement(c, o);
+  if (cv.sold + cv.bought > 0) life(p, "Sold goods in " + o.name, "");
+  H2.trade.stats.caravans++; H2.trade.stats.sold += cv.sold; H2.trade.stats.bought += cv.bought; H2.trade.stats.coin += Math.round(cv.coin);
+  if (cv.sold + cv.bought > 0) {
+    chronicle(nm(p) + " of " + c.name + " traded with " + o.name + " (" + cv.sold + " sold, " + cv.bought + " bought).", false, c.fac);
+    H2.trade.routes.push({ from: c.name, to: o.name, day: dayNumber(), t: pixelTicks, sold: cv.sold, bought: cv.bought, coin: Math.round(cv.coin), fac: c.fac });
+    if (H2.trade.routes.length > 24) H2.trade.routes.shift();
+  }
+}
+function recordAgreement(c, o) {
+  const key = Math.min(c.id, o.id) + "-" + Math.max(c.id, o.id);
+  const n = H2.trade.pairs[key] = (H2.trade.pairs[key] || 0) + 1;
+  if (c.fac !== o.fac) {
+    c.tensionPts = Math.max(0, (c.tensionPts || 0) - 3);
+    o.tensionPts = Math.max(0, (o.tensionPts || 0) - 3);
+    if (n === 4) chronicle("Growing trade binds " + c.name + " and " + o.name + " — tensions ease between the " + FAC[c.fac].name + " and " + FAC[o.fac].name + ".", true, c.fac);
+  }
+}
+function depositCaravan(p, c, cv) {
+  for (const g of TRADE_GOODS) { const q = p.inv[g] || 0; if (q) { c.stock[g] = (c.stock[g] || 0) + q; p.inv[g] = 0; } }
+  const net = p.coin - (cv.startCoin === undefined ? p.coin : cv.startCoin);
+  if (net > 0) { const toTown = Math.floor(net * 0.8); c.stock.coin = (c.stock.coin || 0) + toTown; p.coin -= toTown; if (p.coin < 0) p.coin = 0; }
+  p.lastDep = pixelTicks;
+}
+function finishCaravan(p) { p.lastTrade = pixelTicks; p.caravan = null; }
+
+TASKS.trade = function (p, t) {
+  const c = colById(p.col); if (!c || c.nomad) return "done";
+  let cv = p.caravan;
+  if (!cv || !cv.active) {
+    const o = colById(p._tpid) || pickPartner(c);
+    if (!o) return "done";
+    cv = p.caravan = { active: true, to: o.id, from: c.id, t0: pixelTicks, phase: 0, sold: 0, bought: 0, coin: 0, carried: {}, startCoin: p.coin };
+  }
+  if (pixelTicks - cv.t0 > DAY && cv.phase < 3) cv.phase = 3;     // overall timeout: head home
+  let o = colById(cv.to);
+  if ((!o || (o.pop || 0) <= 0) && cv.phase < 3) { cv.phase = 3; o = null; }
+
+  if (cv.phase === 0) {                                           // load at home
+    const spot = tradeSpot(c);
+    const r = goTo(p, spot.x, spot.y, 3, 5);
+    if (r === "fail") { loadCaravan(p, c, o); cv.phase = 1; return; }
+    if (r !== "arrive") return;
+    loadCaravan(p, c, o); cv.phase = 1; return;
+  }
+  if (cv.phase === 1) {                                           // travel to the partner
+    if (!o) { cv.phase = 3; return; }
+    const spot = tradeSpot(o);
+    const r = goTo(p, spot.x, spot.y, 3, 6);
+    if (r === "fail") { cv.f = (cv.f || 0) + 1; if (cv.f > 12) cv.phase = 3; return; }
+    if (r === "arrive") cv.phase = 2;
+    return;
+  }
+  if (cv.phase === 2) { doTrade(p, c, o, cv); cv.phase = 3; return; }
+
+  // phase 3: return home and deposit
+  const hx = c.hall ? c.hall.x : c.x, hy = c.hall ? c.hall.y : c.y;
+  const r = goTo(p, hx, hy, 3, 6);
+  if (r === "arrive" || r === "fail" || pixelTicks - cv.t0 > DAY * 1.6) {
+    depositCaravan(p, c, cv);
+    finishCaravan(p);
+    return "done";
+  }
+};
+
+/* ======================================================================
+   WORLD EVENTS: festivals, wandering traders, bandit raids, plague
+   ----------------------------------------------------------------------
+   A rate-limited scheduler (chained onto H2.everyTick) occasionally fires
+   world events, and god-event spawner elements let the player trigger them
+   by hand. Nomads (wandering traders, bandits) live in a hidden "nomad"
+   colony that is flagged so the colony AI leaves it alone; they are detected
+   as friends/foes by the p.nomad field rather than by faction, so they never
+   pollute the two real factions' war or diplomacy.
+
+   p.nomad values: "trader" (neutral pedlar) · "bandit" (hostile raider)
+   nomad colony flags: c.nomad=true, c.nomadTrader / c.nomadBandit, c.famine=true
+   ====================================================================== */
+
+const BANDIT_COLOR = "#5a3a2a";
+
+H2.events = {
+  last: [], timers: {},
+  trigger: function (name, x) {
+    try {
+      let ok = false;
+      if (name === "festival") ok = startFestival(x);
+      else if (name === "trader") ok = spawnTrader(x);
+      else if (name === "bandits" || name === "raid") ok = startRaid(x);
+      else if (name === "plague") ok = startPlague(x);
+      if (ok) H2.events.timers[name === "raid" ? "bandits" : name] = pixelTicks;
+      return ok;
+    } catch (e) { H2.lastError = e; return false; }
+  },
+};
+function logEvent(name, x) { H2.events.last.push({ name: name, t: pixelTicks, day: dayNumber(), x: x }); if (H2.events.last.length > 24) H2.events.last.shift(); }
+
+/* ---- helpers ------------------------------------------------------------- */
+function liveTowns() { return H2.cols.filter((c) => !c.nomad && (c.pop || 0) > 0); }
+function eventsAllowed() { return H2.cfg.events !== false && liveTowns().length > 0 && H2.people.length < H2.cfg.maxPeople; }
+function pickTown(x, list) {
+  list = list || liveTowns(); if (!list.length) return null;
+  if (x === undefined || x === null) return pick(list);
+  let best = null, bd = 1e9;
+  for (const c of list) { const d = Math.abs(c.x - x); if (d < bd) { bd = d; best = c; } }
+  return best;
+}
+function removeCol(nc) { const i = H2.cols.indexOf(nc); if (i >= 0) H2.cols.splice(i, 1); }
+function findEdgeGround(preferSide) {
+  const sides = preferSide < 0 ? [-1, 1] : [1, -1];
+  for (const side of sides) {
+    const x0 = side < 0 ? 2 : width - 3;
+    for (let dx = 0; dx < 20; dx++) {
+      const x = clamp(x0 - side * dx, 2, width - 3);
+      const gy = groundY(x, 2, height - 3);
+      if (gy > 2 && isEmpty(x, gy) && isEmpty(x, gy - 1)) return { x: x, y: gy };
+    }
+  }
+  return null;
+}
+function makeNomadColony(fac, x, y, flags) {
+  const c = {
+    id: H2.colSeq++, fac: fac, x: x, y: y, name: "Nomads", founded: pixelTicks, pop: 0,
+    stock: { wood: 0, stone: 0, iron: 0, grain: 0, bread: 0, herbs: 0, powder: 0, coin: 0, sword: 0, armor: 0, cannon: 0, bow: 0 },
+    price: { bread: 4, wood: 2, stone: 3, iron: 6, grain: 2 }, tax: 0.1,
+    plans: [], corpses: [], deaths: 0, births: 0, tension: 0, tensionPts: 0, unrest: 0, hall: null, beds: 0, jobs: {},
+    intel: { enemy: null, seen: {}, last: 0, estimate: null }, war: { state: "peace", since: pixelTicks, target: null, order: null },
+    log: [], crimes: 0, built: {}, tech: 0, festival: 0, lastThink: 0,
+    nomad: true, famine: true, empty: 0,
+  };
+  if (flags) Object.assign(c, flags);
+  H2.cols.push(c);
+  return c;
+}
+function despawnPerson(p) {
+  if (!p || p.id === undefined || p.del) return;
+  const c = colById(p.col);
+  const h = isChildPx(p) ? null : headOf(p);
+  p.quiet = true; if (h) h.quiet = true;
+  try { if (h && !h.del) deletePixel(h.x, h.y); } catch (e) {}
+  try { if (!p.del) deletePixel(p.x, p.y); } catch (e) {}
+  p.del = true; p.dead = p.dead || pixelTicks;
+  if (c) c.pop = Math.max(0, (c.pop || 1) - 1);
+}
+
+/* ---- 1. HARVEST FESTIVAL -------------------------------------------------- */
+function festivalSquare(c) {
+  const f = H2.nearestOf((H2.st.campfire || []).concat(H2.st.hall || []), c.x, c.y, 120);
+  if (f) return { x: f.x, y: accY(f) };
+  return { x: c.x, y: c.y };
+}
+function maybeFestivalWeddings(c) {
+  const singles = H2.people.filter((p) => p.col === c.id && !p.dead && !p.nomad && !isChildPx(p) && !p.sp && stageOf(p) === "adult");
+  let weddings = 0;
+  for (const a of singles) {
+    if (weddings >= 2) break;
+    if (a.sp) continue;
+    const b = singles.find((q) => q !== a && !q.sp && q.sex !== a.sex && q.fac === a.fac && !(a.kids.includes(q.id) || a.par.includes(q.id)));
+    if (b && rnd() < 0.5) { try { marry(a, b); weddings++; } catch (e) {} }
+  }
+}
+function startFestival(x) {
+  const towns = liveTowns(); if (!towns.length) return false;
+  const c = pickTown(x, towns); if (!c) return false;
+  const dur = rint(700, 1100);
+  c.festival = pixelTicks + dur;
+  chronicle("A harvest festival begins in " + c.name + "! Villagers gather to feast and dance.", true, c.fac);
+  const square = festivalSquare(c);
+  const mine = H2.people.filter((p) => p.col === c.id && !p.dead && !p.nomad);
+  let attend = 0;
+  for (const p of mine) {
+    if (attend >= 20) break;
+    if (p.task && (p.task.pri || 0) > 40) continue;
+    if (setTask(p, "festival", { until: c.festival, sx: square.x, sy: square.y }, 34)) { addThought(p, "festival", 10, dur); attend++; }
+  }
+  const sample = mine.slice().sort(() => rnd() - 0.5).slice(0, 4);
+  for (const p of sample) life(p, "Danced at the harvest festival", "");
+  maybeFestivalWeddings(c);
+  logEvent("festival", c.x);
+  return true;
+}
+TASKS.festival = function (p, t) {
+  const c = colById(p.col); if (!c) return "done";
+  if (!c.festival || pixelTicks > c.festival || pixelTicks > t.until) return "done";
+  const r = goTo(p, t.sx + ((p.id % 7) - 3), t.sy, 2, 4);
+  if (r === "fail") return "done";
+  if (rnd() < 0.1 && !isNight()) shift(p, 0, -1);                 // a little dance hop
+  if (r === "arrive") { addThought(p, "festival", 4, 300); if (H2.chat && rnd() < 0.12) H2.chat(p); }
+};
+
+/* ---- 2. WANDERING TRADER -------------------------------------------------- */
+function spawnTrader(x) {
+  if (!eventsAllowed()) return false;
+  const towns = liveTowns(); if (!towns.length) return false;
+  const tgt = pickTown(x, towns); if (!tgt) return false;
+  const es = findEdgeGround(tgt.x > width / 2 ? 1 : -1); if (!es) return false;
+  if (H2.people.length >= H2.cfg.maxPeople - 2) return false;
+  const nc = makeNomadColony(tgt.fac, es.x, es.y, { name: "Wandering Traders", nomadTrader: true });
+  const b = spawnPerson(es.x, es.y, tgt.fac, { col: nc.id, job: "merchant" });
+  if (!b) { removeCol(nc); return false; }
+  b.nomad = "trader"; b.title = ""; b.coin = rint(20, 40); b.color = "#caa23a";
+  b.exotic = { iron: rint(2, 6), herbs: rint(2, 6), powder: rint(0, 4), bow: rint(0, 2) };
+  b.trader = { to: tgt.id, phase: 0, t0: pixelTicks };
+  setTask(b, "hz_trader", {}, 80);
+  chronicle("A wandering trader approaches " + tgt.name + " with exotic wares.", true, tgt.fac);
+  logEvent("trader", es.x);
+  return true;
+}
+function traderSell(p, o) {
+  let sold = 0;
+  for (const g in (p.exotic || {})) {
+    const q = p.exotic[g] || 0; if (!q) continue;
+    const price = g === "bow" ? 10 : g === "iron" ? 6 : g === "powder" ? 5 : g === "herbs" ? 4 : 3;
+    const pay = Math.min(q * price, Math.floor(o.stock.coin || 0));
+    const qSold = Math.min(q, Math.floor(pay / price));
+    if (qSold > 0) { o.stock[g] = (o.stock[g] || 0) + qSold; o.stock.coin -= qSold * price; p.coin += qSold * price; p.exotic[g] -= qSold; sold += qSold; }
+  }
+  if (sold > 0) {
+    try { updateEconomy(o); } catch (e) {}
+    chronicle("The wandering trader sells " + sold + " exotic wares in " + o.name + ".", false, o.fac);
+    const v = H2.people.find((q) => q.col === o.id && !q.nomad && !isChildPx(q) && !q.dead);
+    if (v) life(v, "Bought a trinket from a wandering trader", "");
+  }
+}
+TASKS.hz_trader = function (p, t) {
+  const tr = p.trader; if (!tr) return "done";
+  const o = colById(tr.to);
+  if (tr.phase === 0) {
+    if (!o || (o.pop || 0) <= 0) { tr.phase = 2; return; }
+    const spot = tradeSpot(o);
+    const r = goTo(p, spot.x, spot.y, 3, 6);
+    if (r === "arrive") { traderSell(p, o); tr.phase = 2; tr.leftT = pixelTicks; }
+    else if (r === "fail") { tr.fail = (tr.fail || 0) + 1; if (tr.fail > 12) tr.phase = 2; }
+    else if (pixelTicks - tr.t0 > DAY) tr.phase = 2;
+    return;
+  }
+  // leave the map and vanish
+  const side = p.x > width / 2 ? 1 : -1, ex = side > 0 ? width - 2 : 2;
+  const r = goTo(p, ex, p.y, 1, 24);
+  if (r === "arrive" || p.x <= 2 || p.x >= width - 2 || pixelTicks - (tr.leftT || tr.t0) > DAY) { despawnPerson(p); return "done"; }
+  if (r === "fail") { tr.lf = (tr.lf || 0) + 1; if (tr.lf > 16) { despawnPerson(p); return "done"; } }
+};
+
+/* ---- 3. BANDIT RAID ------------------------------------------------------- */
+function nearestVictim(p, R) {
+  let best = null, bd = 1e9; const ppl = H2.people;
+  for (let i = 0; i < ppl.length; i++) { const q = ppl[i]; if (q === p || q.nomad || q.dead) continue; const dx = Math.abs(q.x - p.x), dy = Math.abs(q.y - p.y); if (dx > R || dy > R) continue; const d = dx + dy; if (d < bd) { bd = d; best = q; } }
+  return best;
+}
+function nearestBandit(p, R) {
+  const list = H2._bandits; if (!list || !list.length) return null;
+  let best = null, bd = 1e9;
+  for (const b of list) { if (!b || b.dead || b.del || b.nomad !== "bandit") continue; const dx = Math.abs(b.x - p.x), dy = Math.abs(b.y - p.y); if (dx > R || dy > R) continue; const d = dx + dy; if (d < bd) { bd = d; best = b; } }
+  return best;
+}
+function startRaid(x) {
+  if (!eventsAllowed()) return false;
+  const towns = liveTowns().filter((c) => (c.pop || 0) >= 3); if (!towns.length) return false;
+  const tgt = pickTown(x, towns); if (!tgt) return false;
+  const n = rint(3, 6);
+  if (H2.people.length >= H2.cfg.maxPeople - n - 1) return false;
+  const es = findEdgeGround(tgt.x > width / 2 ? 1 : -1); if (!es) return false;
+  const nc = makeNomadColony(tgt.fac, es.x, es.y, { name: "Bandits", nomadBandit: true });
+  const raid = { id: nc.id, col: nc.id, target: tgt.id, total: 0, members: [], retreat: false, t0: pixelTicks, loot: 0 };
+  const sdir = es.x < width / 2 ? 1 : -1;
+  let made = 0;
+  for (let i = 0; i < n; i++) {
+    const sx = clamp(es.x + i * sdir * 2, 2, width - 3);
+    const gy = groundY(sx, 2, height - 3); if (gy < 2 || !isEmpty(sx, gy) || !isEmpty(sx, gy - 1)) continue;
+    const b = spawnPerson(sx, gy, tgt.fac, { col: nc.id, job: "laborer" });
+    if (!b) continue;
+    b.nomad = "bandit"; b.title = "Bandit"; b.wpn = pick(["sword", "spear", "sword"]); b.arm = 0; b.color = BANDIT_COLOR; b.hp = 100;
+    b.band = nc.id; b.raidCol = tgt.id;
+    setTask(b, "hz_raid", {}, 80);
+    raid.members.push(b.id); made++;
+  }
+  if (!made) { removeCol(nc); return false; }
+  raid.total = made;
+  if (!H2._raids) H2._raids = {};
+  H2._raids[nc.id] = raid;
+  chronicle("Bandits descend upon " + tgt.name + "!", true, tgt.fac);
+  logEvent("bandits", es.x);
+  return true;
+}
+TASKS.hz_raid = function (p, t) {
+  const raid = H2._raids && H2._raids[p.band];
+  if (!raid) return "done";
+  const tgt = colById(p.raidCol);
+  if (raid.retreat || !tgt || (tgt.pop || 0) <= 0) {
+    const side = p.x > width / 2 ? 1 : -1, ex = side > 0 ? width - 2 : 2;
+    const r = goTo(p, ex, p.y, 1, 24);
+    if (r === "arrive" || p.x <= 2 || p.x >= width - 2) { despawnPerson(p); return "done"; }
+    if (r === "fail") { p.rf = (p.rf || 0) + 1; if (p.rf > 18) { despawnPerson(p); return "done"; } }
+    return;
+  }
+  // 1. attack a nearby villager
+  const v = nearestVictim(p, 7);
+  if (v) {
+    const dx = v.x - p.x, dy = v.y - p.y; p.dir = Math.sign(dx) || p.dir;
+    if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) {
+      if (pixelTicks >= (p.cool || 0)) { const w = WEAPON[p.wpn || "sword"] || WEAPON.fist; p.cool = pixelTicks + 16; const dmg = w.dmg * (0.7 + rnd() * 0.5); v.lastHit = { c: "battle", t: pixelTicks, by: p.id }; hurt(v, dmg, "battle", p); p.sk.fight += 0.03; }
+      return;
+    }
+    const r = goTo(p, v.x, v.y, 1, 3); if (r !== "fail") return;
+  }
+  // 2. plunder the stores
+  const spot = tradeSpot(tgt);
+  const r = goTo(p, spot.x, spot.y, 2, 6);
+  if (r === "arrive") {
+    if (pixelTicks >= (p.cool || 0)) {
+      p.cool = pixelTicks + 30; let took = 0;
+      for (const g of ["bread", "grain", "wood", "iron", "coin"]) { const take = Math.min(tgt.stock[g] || 0, rint(1, 3)); if (take > 0) { tgt.stock[g] -= take; raid.loot += take; took += take; } }
+      if (took && rnd() < 0.12) chronicle("Bandits plunder the stores of " + tgt.name + ".", false, tgt.fac);
+    }
+  } else if (r === "fail") { p.sf = (p.sf || 0) + 1; if (p.sf > 10) { p.sf = 0; tryWalk(p, p.x < tgt.x ? 1 : -1, true); } }
+};
+// a hero's response to bandits: close in and strike (independent of the faction war system)
+TASKS.hz_combat = function (p, t) {
+  let q = H2.byId[t.tid];
+  if (!q || q.dead || q.del || q.nomad !== "bandit") { q = nearestBandit(p, 20); if (!q) return "done"; t.tid = q.id; }
+  const w = WEAPON[p.wpn || "fist"] || WEAPON.fist;
+  const dx = q.x - p.x, dy = q.y - p.y; p.dir = Math.sign(dx) || p.dir;
+  if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) {
+    if (pixelTicks >= (p.cool || 0)) {
+      p.cool = pixelTicks + 14; const dmg = w.dmg * (0.75 + rnd() * 0.5) * (1 + p.sk.fight * 0.012);
+      q.lastHit = { c: "battle", t: pixelTicks, by: p.id }; hurt(q, dmg, "battle", p); p.sk.fight += 0.06;
+      if (q.dead && q.nomad === "bandit" && !q._slain) { q._slain = 1; life(p, "Fought off bandits", "hero"); }
+    }
+    return;
+  }
+  const r = goTo(p, q.x, q.y, 1, 3); if (r === "fail") return "done";
+};
+
+/* ---- 4. PLAGUE ------------------------------------------------------------ */
+function startPlague(x) {
+  const towns = liveTowns().filter((c) => (c.pop || 0) >= 4); if (!towns.length) return false;
+  const c = pickTown(x, towns); if (!c) return false;
+  const cands = H2.people.filter((p) => p.col === c.id && !p.dead && !p.sick && !isChildPx(p) && !p.nomad);
+  if (!cands.length) return false;
+  infect(pick(cands), "plague");                                 // infect() writes its own (major) chronicle
+  logEvent("plague", c.x);
+  return true;
+}
+
+/* ---- nomad upkeep: keep raiders/traders out of the colony AI's hands ------ */
+function nomadMaintain() {
+  const cols = H2.cols; let anyNomad = false;
+  for (const c of cols) if (c.nomad) { anyNomad = true; break; }
+  if (!anyNomad) { if (H2._bandits && H2._bandits.length) H2._bandits.length = 0; return; }
+
+  const bandits = [];
+  for (let i = 0; i < H2.people.length; i++) {
+    const p = H2.people[i]; if (!p.nomad || p.dead || p.del) continue;
+    // re-assert identity after the colony job system may have meddled
+    if (p.nomad === "bandit") { p.title = "Bandit"; p.color = BANDIT_COLOR; if (!p.wpn) p.wpn = "sword"; bandits.push(p); if (p.job !== "laborer") p.job = "laborer"; }
+    else if (p.nomad === "trader") { p.color = "#caa23a"; if (p.job !== "merchant") p.job = "merchant"; }
+    // keep the persistent nomad task alive (assignJobs clears tasks periodically)
+    if (!p.task || (p.task.pri || 0) < 80) {
+      if (p.panic > 0 || p.burning) { /* let the panic reflex run */ }
+      else if (p.nomad === "bandit") setTask(p, "hz_raid", {}, 80);
+      else if (p.nomad === "trader") setTask(p, "hz_trader", {}, 80);
+    }
+  }
+  H2._bandits = bandits;
+
+  // raids: retreat when half are down, clean up when the band is gone
+  if (H2._raids) {
+    for (const id in H2._raids) {
+      const raid = H2._raids[id];
+      let alive = 0;
+      for (const mid of raid.members) { const b = H2.byId[mid]; if (b && !b.dead && !b.del) alive++; }
+      raid.alive = alive;
+      if (!raid.retreat && alive <= Math.floor(raid.total / 2)) {
+        raid.retreat = true;
+        const tgt = colById(raid.target);
+        chronicle("The surviving bandits break and flee" + (tgt ? " " + tgt.name : "") + ".", true, tgt ? tgt.fac : -1);
+      }
+      if (alive === 0) delete H2._raids[id];
+    }
+  }
+
+  // remove spent nomad colonies before the colony loop can grumble about them
+  for (let i = cols.length - 1; i >= 0; i--) {
+    const c = cols[i]; if (!c.nomad) continue;
+    let live = 0;
+    for (let j = 0; j < H2.people.length; j++) { const p = H2.people[j]; if (p.col === c.id && !p.dead && !p.del) { live++; break; } }
+    if (!live) { c.pop = 0; cols.splice(i, 1); }
+    else c.empty = 0;
+  }
+}
+
+/* ---- scheduler ------------------------------------------------------------ */
+function eventsSchedule() {
+  const towns = liveTowns(); if (!towns.length) return;
+  const T = H2.events.timers;
+  const due = (k, cd) => pixelTicks - (T[k] === undefined ? -cd : T[k]) >= cd;
+  if (due("festival", DAY * 2.5) && rnd() < 0.25) {
+    const good = towns.filter((c) => (c.pop || 0) >= 4 && (c.stock.bread + c.stock.grain * 0.5) > c.pop * 2.2 && (!c.festival || pixelTicks > c.festival));
+    if (good.length) H2.events.trigger("festival", pick(good).x);
+  }
+  if (due("trader", DAY * 2) && rnd() < 0.2) H2.events.trigger("trader");
+  if (due("bandits", DAY * 4) && rnd() < 0.14) { const rich = towns.filter((c) => (c.pop || 0) >= 5); if (rich.length) H2.events.trigger("bandits", pick(rich).x); }
+  if (due("plague", DAY * 8) && rnd() < 0.08) { const crowd = towns.filter((c) => (c.pop || 0) >= 6); if (crowd.length) H2.events.trigger("plague", pick(crowd).x); }
+}
+function eventsTick() {
+  if (H2.cfg.events === false) { if (H2._bandits && H2._bandits.length) H2._bandits.length = 0; return; }
+  try { nomadMaintain(); } catch (e) { H2.lastError = e; }
+  if (pixelTicks % 90 === 30) { try { eventsSchedule(); } catch (e) { H2.lastError = e; } }
+}
+
+/* ---- bandit reflex: wrap the war-reflex so everyone reacts to raiders ----- */
+const _h2_warThink_prevEV = H2.warThink;
+H2.warThink = function (p, col) {
+  if (p.nomad) return false;                                     // nomads run their own tasks
+  if (H2._bandits && H2._bandits.length && !p.burning && !(p.panic > 2)) {
+    const b = nearestBandit(p, 15);
+    if (b) {
+      const def = p.job === "soldier" || p.job === "sentry" || p.job === "guard" || p.job === "scout";
+      if (def || (trait(p, "b") > 0.25 && !isChildPx(p) && p.hp > 45 && Math.abs(b.x - p.x) <= 4)) {
+        return setTask(p, "hz_combat", { tid: b.id }, 92);
+      }
+      p.panic = Math.max(p.panic || 0, 3);
+      return setTask(p, "flee", { until: pixelTicks + 90, from: b.x }, 96);
+    }
+  }
+  return _h2_warThink_prevEV ? _h2_warThink_prevEV(p, col) : false;
+};
+
+/* ---- shield the hidden nomad colonies from the colony AI ------------------ */
+const _h2_planBuild_prevEV = H2.planBuild;
+H2.planBuild = function (c) { if (c && c.nomad) return; return _h2_planBuild_prevEV ? _h2_planBuild_prevEV(c) : undefined; };
+const _h2_warThinkColony_prevEV = H2.warThinkColony;
+H2.warThinkColony = function (c) { if (c && c.nomad) return; return _h2_warThinkColony_prevEV ? _h2_warThinkColony_prevEV(c) : undefined; };
+
+/* ---- scheduler hook (chain, never overwrite) ------------------------------ */
+const _h2_everyTick_prevEV = H2.everyTick;
+H2.everyTick = function () {
+  if (_h2_everyTick_prevEV) { try { _h2_everyTick_prevEV(); } catch (e) { H2.lastError = e; } }
+  try { eventsTick(); } catch (e) { H2.lastError = e; }
+};
+
+/* ---- god-event spawner elements ------------------------------------------- */
+function eventSpawner(name, evt, colors, desc) {
+  elements[name] = {
+    category: "villagers", color: colors, state: "solid", behavior: behaviors.WALL, excludeRandom: true,
+    maxSize: 1, cooldown: defaultCooldown, desc: desc, forceSaveColor: true,
+    onPlace: function (pixel) {
+      const x = pixel.x, y = pixel.y;
+      try { deletePixel(x, y); } catch (e) {}
+      try { H2.events.trigger(evt, x); } catch (e) { H2.lastError = e; }
+    },
+  };
+}
+eventSpawner("hz_event_festival", "festival", ["#ffd27a", "#ff9a2e"], "God-event: starts a harvest festival in the nearest settlement.");
+eventSpawner("hz_event_trader", "trader", ["#caa23a", "#e0c25a"], "God-event: sends a wandering trader to the nearest settlement.");
+eventSpawner("hz_event_bandits", "bandits", ["#5a3a2a", "#7a2222"], "God-event: a band of bandits raids the nearest settlement.");
+eventSpawner("hz_event_plague", "plague", ["#6b8f3a", "#3a5a2a"], "God-event: the plague strikes the nearest settlement.");
+
+/* ======================================================================
+   HUMANITIZE 2 — UI / UX LAYER  (10_ui.js)
+   A self-contained, mobile-friendly interface: an inspector tool & card,
+   a HUD bar, a faction dashboard, a chronicle feed, a settings panel and
+   a help/overview panel. Everything is namespaced under .h2- and H2.ui.*,
+   guarded with try/catch, and degrades gracefully in headless jsdom.
+   Original Humanitize by nekonico; this is Humanitize 2.
+   ====================================================================== */
+(function () {
+  "use strict";
+  var w = window;
+  var H2 = w.H2;
+  if (!H2) return;
+  if (H2.ui) return;                      // never double-init
+
+  /* ---------------------------------------------------------------- utils */
+  var UI_DAY = 2400;                      // ticks per in-game day (mirrors core)
+  function tks() { return (typeof w.pixelTicks === "number") ? w.pixelTicks : 0; }
+  function dayNum() { return Math.floor(tks() / UI_DAY) + 1; }
+  function dayFrac() { return (tks() % UI_DAY) / UI_DAY; }
+  function FAC() { return H2.FAC || []; }
+  function facOf(i) { var f = FAC(); return f[i] || { name: "?", adj: "?", flag: "#888", dark: "#555" }; }
+  function clampN(v, a, b) { v = +v; if (isNaN(v)) v = a; return v < a ? a : v > b ? b : v; }
+  function nmOf(p) { try { return H2.nm ? H2.nm(p) : (p && p.name) || "Someone"; } catch (e) { return "Someone"; } }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function titleCase(s) { s = String(s || "").replace(/_/g, " "); return s.replace(/\b\w/g, function (m) { return m.toUpperCase(); }); }
+  function has(o) { return o !== undefined && o !== null; }
+  function round(n) { return Math.round(+n || 0); }
+
+  /* resolve selected person live from byId, falling back to last object */
+  function resolveSel() {
+    var id = UI.selId;
+    if (id == null) return null;
+    var live = (H2.byId && H2.byId[id]) || null;
+    if (live && !live.del) return live;
+    return (UI.selObj && !UI.selObj.del) ? UI.selObj : null;
+  }
+
+  /* ------------------------------------------------------------- namespace */
+  var UI = H2.ui = {
+    selId: null, selObj: null,
+    panels: {},                 // name -> {panel, body, ...}
+    hist: [[], []],             // population history per faction (for sparkline)
+    _built: false, _style: false,
+    _lastChron: 0,
+  };
+
+  /* --------------------------------------------------------------- styles */
+  var CSS = [
+    ".h2-root{position:fixed;inset:0;pointer-events:none;z-index:2147483000;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;color:#e8edf2;}",
+    ".h2-root *{box-sizing:border-box;}",
+    ".h2-panel{position:absolute;pointer-events:auto;background:rgba(18,22,30,0.93);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid rgba(120,140,170,0.28);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.5);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;min-width:220px;}",
+    ".h2-head{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:grab;background:linear-gradient(180deg,rgba(40,48,64,0.8),rgba(26,32,44,0.6));border-bottom:1px solid rgba(120,140,170,0.22);user-select:none;flex:0 0 auto;}",
+    ".h2-head:active{cursor:grabbing;}",
+    ".h2-title{font-weight:600;font-size:13px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.2px;}",
+    ".h2-x,.h2-btn{pointer-events:auto;cursor:pointer;background:rgba(80,92,120,0.35);color:#e8edf2;border:1px solid rgba(140,160,190,0.3);border-radius:7px;padding:5px 9px;font-size:12px;line-height:1;transition:background .12s;}",
+    ".h2-x{padding:5px 8px;font-size:13px;}",
+    ".h2-btn:hover,.h2-x:hover{background:rgba(110,130,170,0.55);}",
+    ".h2-btn.on{background:rgba(70,130,220,0.65);border-color:rgba(120,170,240,.6);}",
+    ".h2-body{padding:10px;overflow:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1 1 auto;}",
+    ".h2-sec{margin:0 0 9px;}",
+    ".h2-h{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:#8ea2bf;margin:0 0 4px;font-weight:600;}",
+    ".h2-row{display:flex;flex-wrap:wrap;gap:4px 10px;}",
+    ".h2-kv{display:flex;gap:6px;}.h2-kv b{color:#aab8cc;font-weight:500;}",
+    ".h2-dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 0 1px rgba(0,0,0,.4);}",
+    ".h2-chip{display:inline-block;background:rgba(90,105,135,0.4);border:1px solid rgba(140,160,190,0.25);border-radius:20px;padding:2px 9px;font-size:11px;margin:2px 3px 0 0;}",
+    ".h2-bar{position:relative;height:13px;background:rgba(70,80,100,0.45);border-radius:7px;overflow:hidden;margin:3px 0;}",
+    ".h2-bar>i{position:absolute;inset:0 auto 0 0;border-radius:7px;transition:width .25s;}",
+    ".h2-bar>span{position:absolute;inset:0;font-size:10px;line-height:13px;text-align:center;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.7);}",
+    ".h2-barlab{display:flex;justify-content:space-between;font-size:11px;color:#9fb0c7;margin-top:4px;}",
+    ".h2-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:4px;}",
+    ".h2-gcell{background:rgba(60,70,92,0.4);border-radius:6px;padding:4px 6px;font-size:11px;}",
+    ".h2-gcell b{display:block;color:#aab8cc;font-weight:500;font-size:10px;}",
+    ".h2-link{color:#79b0ff;cursor:pointer;text-decoration:none;border-bottom:1px dotted rgba(121,176,255,.5);}",
+    ".h2-link:hover{color:#a9ccff;}",
+    ".h2-life{list-style:none;margin:0;padding:0;max-height:200px;overflow:auto;}",
+    ".h2-life li{display:flex;gap:7px;padding:4px 2px;border-bottom:1px solid rgba(120,140,170,0.12);font-size:12px;}",
+    ".h2-life .d{color:#7f93b0;flex:0 0 auto;min-width:46px;font-size:11px;}",
+    ".h2-life .ic{flex:0 0 auto;}",
+    ".h2-life li.big{background:rgba(70,110,200,0.12);border-radius:5px;}",
+    ".h2-dead{color:#ff8a8a;font-weight:600;}",
+    ".h2-hud{left:50%;transform:translateX(-50%);top:8px;flex-direction:row;align-items:center;gap:6px;padding:6px 8px;min-width:0;max-width:96vw;flex-wrap:wrap;}",
+    ".h2-hud .h2-seg{display:flex;align-items:center;gap:5px;padding:2px 8px;border-right:1px solid rgba(120,140,170,0.2);font-size:12px;white-space:nowrap;}",
+    ".h2-hud .h2-seg:last-child{border-right:0;}",
+    ".h2-spark{display:block;width:100%;height:30px;background:rgba(60,70,92,0.35);border-radius:6px;}",
+    ".h2-filter{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;}",
+    ".h2-chron{list-style:none;margin:0;padding:0;}",
+    ".h2-chron li{padding:5px 4px;border-bottom:1px solid rgba(120,140,170,0.12);font-size:12px;line-height:1.35;}",
+    ".h2-chron li.maj{font-weight:600;}",
+    ".h2-chron .d{color:#7f93b0;font-size:11px;margin-right:5px;}",
+    ".h2-set{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(120,140,170,0.1);}",
+    ".h2-set label{font-size:12px;}",
+    ".h2-set input[type=number]{width:72px;}",
+    ".h2-set select,.h2-set input{background:rgba(40,48,64,0.9);color:#e8edf2;border:1px solid rgba(140,160,190,0.3);border-radius:6px;padding:4px 6px;font-size:12px;}",
+    ".h2-sw{position:relative;width:40px;height:22px;background:rgba(80,92,120,0.5);border-radius:20px;cursor:pointer;flex:0 0 auto;transition:background .15s;}",
+    ".h2-sw::after{content:'';position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#dfe6ef;transition:left .15s;}",
+    ".h2-sw.on{background:rgba(70,130,220,0.8);}.h2-sw.on::after{left:20px;}",
+    ".h2-help p{margin:0 0 8px;line-height:1.45;font-size:12px;}",
+    ".h2-help h4{margin:12px 0 4px;color:#9fc0ff;font-size:12px;}",
+    ".h2-help code{background:rgba(70,90,130,.4);padding:1px 5px;border-radius:4px;font-size:11px;}",
+    ".h2-help ul{margin:0 0 8px;padding-left:18px;}.h2-help li{margin:2px 0;font-size:12px;line-height:1.4;}",
+    ".h2-muted{color:#8296ae;font-size:11px;}",
+    "@media (max-width:700px){",
+    "  .h2-panel:not(.h2-hud){left:0!important;right:0!important;top:auto!important;bottom:0!important;transform:none!important;width:100%!important;max-width:100%!important;border-radius:14px 14px 0 0;max-height:72vh;}",
+    "  .h2-hud{top:4px;font-size:11px;padding:5px 6px;}",
+    "  .h2-x,.h2-btn{padding:8px 11px;font-size:13px;}",
+    "}",
+  ].join("\n");
+
+  function injectStyle() {
+    if (UI._style) return;
+    try {
+      var d = w.document; if (!d || !d.head) return;
+      var s = d.createElement("style"); s.id = "h2-style"; s.textContent = CSS;
+      d.head.appendChild(s); UI._style = true;
+    } catch (e) {}
+  }
+
+  /* --------------------------------------------------------- dom helpers */
+  var root = null;
+  function makeRoot() {
+    var d = w.document;
+    root = d.getElementById("h2-root");
+    if (!root) { root = d.createElement("div"); root.id = "h2-root"; root.className = "h2-root"; d.body.appendChild(root); }
+    return root;
+  }
+  function elem(tag, cls, html) {
+    var e = w.document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function makeDraggable(panel, handle) {
+    try {
+      var sx, sy, ox, oy, drag = false;
+      function down(e) {
+        if (w.innerWidth <= 700) return;           // bottom-sheet on mobile
+        if (e.target && e.target.classList && e.target.classList.contains("h2-x")) return;
+        drag = true;
+        var pt = e.touches ? e.touches[0] : e;
+        var r = panel.getBoundingClientRect();
+        panel.style.transform = "none"; panel.style.left = r.left + "px"; panel.style.top = r.top + "px";
+        panel.style.right = "auto"; panel.style.bottom = "auto";
+        sx = pt.clientX; sy = pt.clientY; ox = r.left; oy = r.top;
+        e.preventDefault();
+      }
+      function move(e) {
+        if (!drag) return;
+        var pt = e.touches ? e.touches[0] : e;
+        var nx = clampN(ox + pt.clientX - sx, 0, w.innerWidth - 60);
+        var ny = clampN(oy + pt.clientY - sy, 0, w.innerHeight - 30);
+        panel.style.left = nx + "px"; panel.style.top = ny + "px";
+      }
+      function up() { drag = false; }
+      handle.addEventListener("mousedown", down); w.addEventListener("mousemove", move); w.addEventListener("mouseup", up);
+      handle.addEventListener("touchstart", down, { passive: false }); w.addEventListener("touchmove", move, { passive: false }); w.addEventListener("touchend", up);
+    } catch (e) {}
+  }
+  function makePanel(name, title, pos) {
+    var p = elem("div", "h2-panel"); p.id = "h2-" + name; p.style.display = "none";
+    if (pos) for (var k in pos) p.style[k] = pos[k];
+    var head = elem("div", "h2-head");
+    var t = elem("span", "h2-title"); t.textContent = title;
+    var x = elem("button", "h2-x"); x.textContent = "✕"; x.title = "Close";
+    x.onclick = function () { UI.close(name); };
+    head.appendChild(t); head.appendChild(x);
+    var body = elem("div", "h2-body");
+    p.appendChild(head); p.appendChild(body);
+    makeDraggable(p, head);
+    root.appendChild(p);
+    var rec = { panel: p, body: body, title: t, head: head, name: name };
+    UI.panels[name] = rec;
+    return rec;
+  }
+
+  /* bar widget */
+  function bar(label, val, max, color) {
+    val = +val || 0; max = max || 100;
+    var pct = clampN((val / max) * 100, 0, 100);
+    return '<div class="h2-barlab"><span>' + esc(label) + '</span><span>' + round(val) + '</span></div>' +
+      '<div class="h2-bar"><i style="width:' + pct + '%;background:' + color + '"></i></div>';
+  }
+
+  /* ========================================================= SELECTION */
+  function personFromPixel(px) {
+    if (!px) return null;
+    var el = px.element;
+    if (el === "hz_body" || el === "hz_child") return (px.id !== undefined) ? px : null;
+    if (el === "hz_head") {
+      var col = w.pixelMap && w.pixelMap[px.x]; var b = col && col[px.y + 1];
+      return (b && (b.element === "hz_body" || b.element === "hz_child") && b.id !== undefined) ? b : null;
+    }
+    return null;
+  }
+  function personNear(x, y, r) {
+    r = r || 2;
+    var best = null, bd = 1e9;
+    if (!w.pixelMap) return null;
+    for (var dx = -r; dx <= r; dx++) for (var dy = -r; dy <= r; dy++) {
+      var xx = x + dx, yy = y + dy;
+      var colm = w.pixelMap[xx]; if (!colm) continue;
+      var o = colm[yy]; if (!o) continue;
+      var p = personFromPixel(o); if (!p) continue;
+      var d = Math.abs(dx) + Math.abs(dy); if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  }
+  function buildingAt(x, y, r) {
+    r = r || 1;
+    if (!w.pixelMap) return null;
+    for (var rr = 0; rr <= r; rr++) for (var dx = -rr; dx <= rr; dx++) for (var dy = -rr; dy <= rr; dy++) {
+      var colm = w.pixelMap[x + dx]; if (!colm) continue;
+      var o = colm[y + dy]; if (!o) continue;
+      var info = w.elements && w.elements[o.element];
+      if (info && info.st) return o;
+    }
+    return null;
+  }
+
+  UI.select = function (p) {
+    try {
+      ensureInit();
+      if (typeof p === "number") p = (H2.byId && H2.byId[p]) || null;
+      if (!p || p.id === undefined) return false;
+      UI.selId = p.id; UI.selObj = p;
+      UI.open("inspector");
+      renderInspector();
+      return true;
+    } catch (e) { return false; }
+  };
+  UI.deselect = function () { UI.selId = null; UI.selObj = null; };
+  UI.selectAt = function (x, y) {
+    var p = personNear(x, y, 2);
+    if (p) return UI.select(p);
+    var b = buildingAt(x, y, 1);
+    if (b) { showBuildingCard(b); return true; }
+    return false;
+  };
+  // called by the inspector tool
+  UI.pickAt = function (pixel) {
+    try {
+      ensureInit();
+      if (!pixel) return;
+      var p = personFromPixel(pixel) || personNear(pixel.x, pixel.y, 2);
+      if (p) { UI.select(p); return; }
+      var info = w.elements && w.elements[pixel.element];
+      if (info && info.st) { showBuildingCard(pixel); return; }
+      var b = buildingAt(pixel.x, pixel.y, 1);
+      if (b) showBuildingCard(b);
+    } catch (e) {}
+  };
+
+  function showBuildingCard(px) {
+    try {
+      ensureInit();
+      var info = w.elements && w.elements[px.element] || {};
+      var owner = null;
+      if (px.cid !== undefined && H2.colById) owner = H2.colById(px.cid);
+      if (!owner && H2.nearestOf && H2.cols) owner = H2.nearestOf(H2.cols, px.x, px.y, 160);
+      var name = titleCase(info.name || px.element.replace(/^hz_/, ""));
+      var rec = UI.panels.inspector; if (!rec) return;
+      UI.selId = null; UI.selObj = null;
+      rec.title.textContent = "🏠 " + name;
+      var html = '<div class="h2-sec"><div class="h2-row">' +
+        '<span class="h2-kv"><b>Type</b> ' + esc(info.st || "structure") + '</span></div></div>';
+      if (owner) {
+        html += '<div class="h2-sec"><div class="h2-h">Settlement</div>' +
+          '<div class="h2-kv"><b>' + esc(owner.name) + '</b> · ' + esc(facOf(owner.fac).name) + '</div>' +
+          '<div class="h2-muted">pop ' + (owner.pop || 0) + ' · founded day ' + (Math.floor((owner.founded || 0) / UI_DAY) + 1) + '</div></div>';
+      }
+      html += '<div class="h2-muted">Tap a villager to inspect them.</div>';
+      rec.body.innerHTML = html;
+      UI.open("inspector");
+    } catch (e) {}
+  }
+
+  /* ========================================================= INSPECTOR */
+  var LIFE_ICON = { birth: "👶", elected: "👑", hero: "⚔️", death: "🕊️", found: "🏗️", marry: "💍", child: "🍼", war: "🔥", job: "🛠️", heal: "➕", kill: "🗡️", trade: "💰", move: "🧭" };
+  var THOUGHT = { widowed: "💔 Grieving a lost spouse", grief: "😢 Mourning", killed: "😟 Took a life", victory: "😤 Tasted victory", protest: "✊ Discontent", hungry: "🍖 Hungry", tired: "😴 Exhausted", cold: "🥶 Freezing", sick: "🤒 Feeling ill", lonely: "🙍 Lonely", happy: "😊 Content" };
+
+  function thoughtText(t) {
+    var base = THOUGHT[t.k] || ("💭 " + titleCase(t.k));
+    return base;
+  }
+
+  function personLink(id) {
+    var q = H2.byId && H2.byId[id];
+    var label = q ? nmOf(q) : ("#" + id);
+    return '<span class="h2-link" data-pid="' + id + '">' + esc(label) + '</span>';
+  }
+
+  function renderInspector() {
+    var rec = UI.panels.inspector; if (!rec) return;
+    var p = resolveSel();
+    if (!p) { rec.title.textContent = "Inspector"; rec.body.innerHTML = '<div class="h2-muted">Select the <b>Inspect</b> tool and tap a villager.</div>'; return; }
+    var F = facOf(p.fac);
+    var stage = (H2.stageOf && H2.stageOf(p)) || "adult";
+    var ageDays = Math.floor(((H2.ageOf && H2.ageOf(p)) || 0) / UI_DAY);
+    var col = (p.col && H2.colById) ? H2.colById(p.col) : null;
+
+    rec.title.innerHTML = '<span class="h2-dot" style="display:inline-block;background:' + F.flag + '"></span> ' + esc(nmOf(p));
+
+    var h = "";
+    // identity
+    h += '<div class="h2-sec"><div class="h2-row">';
+    h += '<span class="h2-kv"><b>' + esc(F.name) + '</b></span>';
+    h += '<span class="h2-kv"><b>Age</b> ' + ageDays + 'd · ' + esc(stage) + '</span>';
+    h += '<span class="h2-kv"><b>Job</b> ' + esc(p.dead ? "—" : (p.job || "—")) + '</span>';
+    h += '<span class="h2-kv"><b>Sex</b> ' + (p.sex === "f" ? "♀" : "♂") + '</span>';
+    h += '</div>';
+    if (p.dead) h += '<div class="h2-dead">† Deceased — ' + esc(p.cause || "unknown causes") + '</div>';
+    h += '</div>';
+
+    // rank / medals
+    if (has(p.rank) || (p.medals && p.medals.length) || p.title) {
+      h += '<div class="h2-sec"><div class="h2-h">Honours</div><div class="h2-row">';
+      if (p.title) h += '<span class="h2-chip">' + esc(p.title) + '</span>';
+      if (has(p.rank)) { var rn = (typeof H2.rankName === "function") ? H2.rankName(p) : null; h += '<span class="h2-chip">⭐ ' + esc(rn || ("Rank " + p.rank)) + '</span>'; }
+      if (has(p.xp)) h += '<span class="h2-chip">XP ' + round(p.xp) + '</span>';
+      if (p.party) h += '<span class="h2-chip">🏛️ Councillor</span>';
+      if (p.ruler) h += '<span class="h2-chip">👑 Ruler</span>';
+      if (p.medals) for (var mi = 0; mi < p.medals.length; mi++) h += '<span class="h2-chip">🎖️ ' + esc(p.medals[mi]) + '</span>';
+      h += '</div></div>';
+    }
+
+    // vitals
+    if (!p.dead) {
+      h += '<div class="h2-sec"><div class="h2-h">Condition</div>';
+      h += bar("Health", p.hp, 100, "linear-gradient(90deg,#e04848,#49d17a)");
+      h += bar("Blood", p.bl, 100, "#d6453f");
+      h += bar("Hunger", p.hu, 100, "#e0a23c");
+      h += bar("Thirst", p.th, 100, "#3cb6e0");
+      h += bar("Energy", p.en, 100, "#9b6cf0");
+      h += bar("Mood", p.mo, 100, "linear-gradient(90deg,#8a6bd1,#49d17a)");
+      var bt = has(p.bt) ? round(p.bt) : 37;
+      var btc = (bt > 39 || bt < 35) ? "#ff8a8a" : "#9fb0c7";
+      h += '<div class="h2-barlab"><span>Body temp</span><span style="color:' + btc + '">' + bt + '°C</span></div>';
+      if (p.sick) h += '<div class="h2-chip" style="background:rgba(180,80,80,.35)">🤒 ' + esc(titleCase(p.sick.k || "ill")) + '</div>';
+      if (p.bleed > 0.2) h += '<div class="h2-chip" style="background:rgba(180,60,60,.35)">🩸 Bleeding</div>';
+      if (p.sleeping) h += '<div class="h2-chip">😴 Asleep</div>';
+      h += '</div>';
+    }
+
+    // traits
+    if (p.tr && p.tr.length) {
+      h += '<div class="h2-sec"><div class="h2-h">Traits</div><div class="h2-row">';
+      for (var ti = 0; ti < p.tr.length; ti++) { var tk = p.tr[ti]; var nm2 = (w.TRAITS && w.TRAITS[tk] && w.TRAITS[tk].c) || tk; h += '<span class="h2-chip">' + esc(nm2) + '</span>'; }
+      h += '</div></div>';
+    }
+
+    // skills
+    if (p.sk) {
+      var sk = p.sk, skKeys = Object.keys(sk), any = false;
+      for (var si = 0; si < skKeys.length; si++) if (sk[skKeys[si]] > 0.05) any = true;
+      if (any) {
+        h += '<div class="h2-sec"><div class="h2-h">Skills</div><div class="h2-grid">';
+        for (var sj = 0; sj < skKeys.length; sj++) { var v = sk[skKeys[sj]]; if (v > 0.05) h += '<div class="h2-gcell"><b>' + esc(titleCase(skKeys[sj])) + '</b>' + v.toFixed(1) + '</div>'; }
+        h += '</div></div>';
+      }
+    }
+
+    // inventory & coin
+    var invKeys = p.inv ? Object.keys(p.inv).filter(function (k) { return p.inv[k] > 0; }) : [];
+    h += '<div class="h2-sec"><div class="h2-h">Belongings</div><div class="h2-row">';
+    h += '<span class="h2-kv"><b>Coin</b> 🪙 ' + round(p.coin || 0) + '</span>';
+    if (p.wpn) h += '<span class="h2-chip">🗡️ ' + esc(titleCase(p.wpn)) + '</span>';
+    if (p.arm) h += '<span class="h2-chip">🛡️ armor ' + round(p.arm) + '</span>';
+    h += '</div>';
+    if (invKeys.length) { h += '<div class="h2-row" style="margin-top:4px">'; for (var ii = 0; ii < invKeys.length; ii++) h += '<span class="h2-chip">' + esc(titleCase(invKeys[ii])) + ' ×' + round(p.inv[invKeys[ii]]) + '</span>'; h += '</div>'; }
+    h += '</div>';
+
+    // family
+    var famParts = [];
+    if (p.sp) famParts.push('<span class="h2-kv"><b>Spouse</b> ' + personLink(p.sp) + '</span>');
+    var pars = (p.par || []).filter(function (x) { return x; });
+    if (pars.length) famParts.push('<span class="h2-kv"><b>Parents</b> ' + pars.map(personLink).join(", ") + '</span>');
+    if (p.kids && p.kids.length) famParts.push('<span class="h2-kv"><b>Children</b> ' + p.kids.map(personLink).join(", ") + '</span>');
+    if (famParts.length) h += '<div class="h2-sec"><div class="h2-h">Family</div><div class="h2-row">' + famParts.join("") + '</div></div>';
+
+    // friends / rivals
+    if (p.fr) {
+      var friends = [], rivals = [];
+      for (var fid in p.fr) { var val = p.fr[fid]; if (val >= 25) friends.push(fid); else if (val <= -25) rivals.push(fid); }
+      if (friends.length || rivals.length) {
+        h += '<div class="h2-sec"><div class="h2-h">Relations</div><div class="h2-row">';
+        if (friends.length) h += '<span class="h2-kv"><b>Friends</b> ' + friends.slice(0, 5).map(personLink).join(", ") + '</span>';
+        if (rivals.length) h += '<span class="h2-kv"><b>Rivals</b> ' + rivals.slice(0, 5).map(personLink).join(", ") + '</span>';
+        h += '</div></div>';
+      }
+    }
+
+    // task + thoughts + kills + settlement
+    h += '<div class="h2-sec"><div class="h2-h">Mind</div>';
+    if (!p.dead && p.task && p.task.k) h += '<div class="h2-kv"><b>Doing</b> ' + esc(titleCase(p.task.k)) + '</div>';
+    var now = tks();
+    var liveTh = (p.th2 || []).filter(function (t) { return t.e > now; });
+    if (liveTh.length) { h += '<div class="h2-row" style="margin-top:4px">'; for (var thi = liveTh.length - 1; thi >= 0 && thi >= liveTh.length - 6; thi--) h += '<span class="h2-chip">' + esc(thoughtText(liveTh[thi])) + '</span>'; h += '</div>'; }
+    h += '<div class="h2-row" style="margin-top:4px">';
+    if (p.kills) h += '<span class="h2-kv"><b>Kills</b> ' + p.kills + '</span>';
+    if (col) h += '<span class="h2-kv"><b>Home</b> ' + esc(col.name) + '</span>';
+    h += '</div></div>';
+
+    // life story timeline
+    h += '<div class="h2-sec"><div class="h2-h">Life story</div>';
+    if (p.life && p.life.length) {
+      h += '<ul class="h2-life">';
+      for (var li = p.life.length - 1; li >= 0; li--) {
+        var ev = p.life[li];
+        var ic = LIFE_ICON[ev.k] || "•";
+        h += '<li' + (ev.big ? ' class="big"' : '') + '><span class="d">Day ' + (ev.day || Math.floor((ev.t || 0) / UI_DAY) + 1) + '</span><span class="ic">' + ic + '</span><span>' + esc(ev.text) + '</span></li>';
+      }
+      h += '</ul>';
+    } else {
+      h += '<div class="h2-muted">No notable events recorded yet.</div>';
+    }
+    h += '</div>';
+
+    rec.body.innerHTML = h;
+  }
+
+  /* ============================================================== HUD */
+  function timeIcon() {
+    var f = dayFrac();
+    if (f < 0.06 || f > 0.80) return "🌙";
+    if (f < 0.14) return "🌅";
+    if (f > 0.62) return "🌇";
+    return "☀️";
+  }
+  function renderHud() {
+    var rec = UI.panels.hud; if (!rec) return;
+    var fp = H2.facPop || {};
+    var cols = H2.cols || [];
+    var h = '<div class="h2-seg"><b>Day ' + dayNum() + '</b> ' + timeIcon() + '</div>';
+    var F = FAC();
+    for (var i = 0; i < F.length; i++) {
+      var nSet = 0; for (var ci = 0; ci < cols.length; ci++) if (cols[ci].fac === i) nSet++;
+      h += '<div class="h2-seg"><span class="h2-dot" style="background:' + F[i].flag + '"></span>' +
+        '<span>' + esc(F[i].name) + ' ' + (fp[i] || 0) + '👤 ' + nSet + '🏰</span></div>';
+    }
+    h += '<div class="h2-seg">' + warSummary() + '</div>';
+    h += '<div class="h2-seg" style="border:0;gap:4px">' +
+      '<button class="h2-btn" data-open="dashboard" title="Factions">🏰</button>' +
+      '<button class="h2-btn" data-open="chronicle" title="Chronicle">📜</button>' +
+      '<button class="h2-btn" data-open="settings" title="Settings">⚙️</button>' +
+      '<button class="h2-btn" data-open="help" title="Help">❓</button></div>';
+    rec.body.innerHTML = h;
+  }
+  function warSummary() {
+    var cols = H2.cols || [], state = "peace";
+    var order = { peace: 0, wary: 1, fortify: 2, prepare: 3, war: 4, siege: 5 };
+    for (var i = 0; i < cols.length; i++) { var s = cols[i].war && cols[i].war.state; if (s && (order[s] || 0) > (order[state] || 0)) state = s; }
+    var icon = state === "peace" ? "🕊️" : (state === "war" || state === "siege") ? "⚔️" : "🛡️";
+    var color = state === "peace" ? "#7fd18a" : (state === "war" || state === "siege") ? "#ff8a8a" : "#e0c060";
+    return icon + ' <span style="color:' + color + '">' + esc(titleCase(state)) + '</span>';
+  }
+
+  /* ========================================================= DASHBOARD */
+  function sparkline(arr, color) {
+    if (!arr || arr.length < 2) return '<div class="h2-muted">gathering data…</div>';
+    var wds = 220, hgt = 30, max = 1;
+    for (var i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+    var step = wds / (arr.length - 1), pts = "";
+    for (var j = 0; j < arr.length; j++) { var x = (j * step).toFixed(1); var y = (hgt - (arr[j] / max) * (hgt - 3) - 1).toFixed(1); pts += x + "," + y + " "; }
+    return '<svg class="h2-spark" viewBox="0 0 ' + wds + ' ' + hgt + '" preserveAspectRatio="none">' +
+      '<polyline fill="none" stroke="' + color + '" stroke-width="1.5" points="' + esc(pts) + '"/></svg>';
+  }
+  function renderDashboard() {
+    var rec = UI.panels.dashboard; if (!rec) return;
+    var F = FAC(), cols = H2.cols || [], fp = H2.facPop || {};
+    var h = "";
+    for (var i = 0; i < F.length; i++) {
+      var fcols = cols.filter(function (c) { return c.fac === i; });
+      h += '<div class="h2-sec"><div class="h2-h"><span class="h2-dot" style="display:inline-block;background:' + F[i].flag + '"></span> ' + esc(F[i].name) + ' — ' + (fp[i] || 0) + ' people, ' + fcols.length + ' settlement' + (fcols.length === 1 ? "" : "s") + '</div>';
+      h += sparkline(UI.hist[i], F[i].flag);
+      for (var ci = 0; ci < fcols.length; ci++) h += settlementCard(fcols[ci]);
+      if (!fcols.length) h += '<div class="h2-muted">No settlements.</div>';
+      h += '</div>';
+    }
+    rec.body.innerHTML = h;
+  }
+  function settlementCard(c) {
+    var h = '<div style="background:rgba(60,70,92,0.3);border-radius:8px;padding:8px;margin:6px 0">';
+    h += '<div style="font-weight:600;margin-bottom:3px">' + esc(c.name) + ' <span class="h2-muted">· founded day ' + (Math.floor((c.founded || 0) / UI_DAY) + 1) + '</span></div>';
+    h += '<div class="h2-row">';
+    h += '<span class="h2-kv"><b>Pop</b> ' + (c.pop || 0) + ' (' + (c.adults || 0) + '🧑 ' + (c.kids || 0) + '🧒)</span>';
+    h += '<span class="h2-kv"><b>Beds</b> ' + (c.beds || 0) + '</span>';
+    h += '<span class="h2-kv"><b>Soldiers</b> ' + (c.sold || 0) + '</span>';
+    if (has(c.tax)) h += '<span class="h2-kv"><b>Tax</b> ' + round((c.tax || 0) * 100) + '%</span>';
+    h += '</div>';
+    // leader / marshal (guarded — may be added by other devs)
+    var lead = c.leader && H2.byId ? H2.byId[c.leader] : null;
+    var marsh = c.marshal && H2.byId ? H2.byId[c.marshal] : null;
+    if (lead || marsh || c.hero || c.founder) {
+      h += '<div class="h2-row" style="margin-top:3px">';
+      if (lead) h += '<span class="h2-kv"><b>' + esc(c.leaderTitle || "Leader") + '</b> ' + personLink(c.leader) + '</span>';
+      if (marsh) h += '<span class="h2-kv"><b>Marshal</b> ' + personLink(c.marshal) + '</span>';
+      if (c.hero) h += '<span class="h2-kv"><b>Hero</b> ' + esc(c.hero) + '</span>';
+      else if (c.founder) h += '<span class="h2-kv"><b>Founder</b> ' + esc(c.founder) + '</span>';
+      h += '</div>';
+    }
+    // war
+    var wst = c.war && c.war.state || "peace";
+    h += '<div class="h2-row" style="margin-top:3px"><span class="h2-kv"><b>War</b> ' + esc(titleCase(wst)) + '</span>';
+    if (has(c.tensionPts) || has(c.tension)) h += '<span class="h2-kv"><b>Tension</b> ' + round(c.tensionPts != null ? c.tensionPts : c.tension) + '</span>';
+    h += '<span class="h2-kv"><b>Born</b> ' + (c.births || 0) + '</span><span class="h2-kv"><b>Died</b> ' + (c.deaths || 0) + '</span></div>';
+    // army (guarded)
+    if (c.army) {
+      h += '<div class="h2-row" style="margin-top:3px">';
+      if (c.army.strategy) h += '<span class="h2-kv"><b>Strategy</b> ' + esc(titleCase(c.army.strategy)) + '</span>';
+      if (has(c.army.morale)) h += '<span class="h2-kv"><b>Morale</b> ' + round(c.army.morale) + '</span>';
+      if (c.army.squads) h += '<span class="h2-kv"><b>Squads</b> ' + c.army.squads.length + '</span>';
+      h += '</div>';
+      if (c.army.squads && c.army.squads.length) {
+        h += '<div class="h2-row" style="margin-top:2px">';
+        for (var sq = 0; sq < c.army.squads.length; sq++) { var s = c.army.squads[sq]; h += '<span class="h2-chip">' + esc(s.name || ("Squad " + (sq + 1))) + (s.members ? " ×" + s.members.length : "") + (s.role ? " · " + esc(s.role) : "") + '</span>'; }
+        h += '</div>';
+      }
+    }
+    // jobs
+    var jobs = c.jobs || {}, jk = Object.keys(jobs);
+    if (jk.length) { h += '<div class="h2-row" style="margin-top:3px">'; for (var ji = 0; ji < jk.length; ji++) h += '<span class="h2-chip">' + esc(titleCase(jk[ji])) + ' ' + jobs[jk[ji]] + '</span>'; h += '</div>'; }
+    // stock
+    var st = c.stock || {}, stk = Object.keys(st).filter(function (k) { return st[k] > 0; });
+    if (stk.length) { h += '<div class="h2-h" style="margin-top:6px">Stores</div><div class="h2-row">'; for (var ki = 0; ki < stk.length; ki++) h += '<span class="h2-chip">' + esc(titleCase(stk[ki])) + ' ' + round(st[stk[ki]]) + '</span>'; h += '</div>'; }
+    // buildings
+    var built = c.built || {}, bk = Object.keys(built).filter(function (k) { return built[k] > 0; });
+    if (bk.length) { h += '<div class="h2-h" style="margin-top:6px">Buildings</div><div class="h2-row">'; for (var bi = 0; bi < bk.length; bi++) h += '<span class="h2-chip">' + esc(titleCase(bk[bi])) + ' ' + built[bk[bi]] + '</span>'; h += '</div>'; }
+    if (c.famine) h += '<div class="h2-chip" style="background:rgba(180,120,40,.35)">🌾 Famine</div>';
+    if (c.riot) h += '<div class="h2-chip" style="background:rgba(180,60,60,.35)">🔥 Unrest</div>';
+    h += '</div>';
+    return h;
+  }
+
+  /* ========================================================= CHRONICLE */
+  UI.chronFilter = -1;   // -1 = all, else faction id
+  UI.chronMajor = false;
+  function renderChronicle() {
+    var rec = UI.panels.chronicle; if (!rec) return;
+    var F = FAC();
+    var chron = H2.chron || [];
+    var head = rec._filter;
+    if (!head) {
+      head = rec._filter = elem("div", "h2-filter");
+      rec.body.appendChild(head);
+      rec._list = elem("ul", "h2-chron"); rec.body.appendChild(rec._list);
+    }
+    // (re)build filter buttons
+    var fh = '<button class="h2-btn' + (UI.chronFilter === -1 ? " on" : "") + '" data-cf="-1">All</button>';
+    for (var i = 0; i < F.length; i++) fh += '<button class="h2-btn' + (UI.chronFilter === i ? " on" : "") + '" data-cf="' + i + '">' + esc(F[i].name) + '</button>';
+    fh += '<button class="h2-btn' + (UI.chronMajor ? " on" : "") + '" data-cmaj="1">Major only</button>';
+    head.innerHTML = fh;
+    var out = "";
+    var shown = 0;
+    for (var j = chron.length - 1; j >= 0 && shown < 120; j--) {
+      var e = chron[j];
+      if (UI.chronMajor && !e.major) continue;
+      if (UI.chronFilter !== -1 && e.fac !== UI.chronFilter && e.fac !== -1) continue;
+      var dot = e.fac >= 0 ? '<span class="h2-dot" style="display:inline-block;width:7px;height:7px;background:' + facOf(e.fac).flag + '"></span> ' : "";
+      out += '<li class="' + (e.major ? "maj" : "") + '"><span class="d">Day ' + e.day + '</span>' + dot + esc(e.text) + '</li>';
+      shown++;
+    }
+    if (!out) out = '<li class="h2-muted">No chronicle entries yet.</li>';
+    rec._list.innerHTML = out;
+  }
+  // throttled refresh hook (core calls H2.refreshChronicle on every new entry)
+  H2.refreshChronicle = function () {
+    try {
+      if (!UI.panels.chronicle || UI.panels.chronicle.panel.style.display === "none") return;
+      var now = Date.now();
+      if (now - UI._lastChron < 400) return;
+      UI._lastChron = now;
+      renderChronicle();
+    } catch (e) {}
+  };
+
+  /* ========================================================== SETTINGS */
+  var SKEY = "H2.settings";
+  function loadSettings() {
+    try {
+      var raw = w.localStorage && w.localStorage.getItem(SKEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && typeof o === "object") for (var k in o) H2.cfg[k] = o[k];
+      }
+    } catch (e) {}
+    if (H2.cfg.names === undefined) H2.cfg.names = "hover";
+    if (H2.cfg.outline === undefined) H2.cfg.outline = true;
+    syncNameMode();
+  }
+  function saveSettings() {
+    try {
+      var keep = ["events", "birth", "war", "expand", "verbose", "maxPerFaction", "townSize", "names", "outline"];
+      var o = {}; for (var i = 0; i < keep.length; i++) o[keep[i]] = H2.cfg[keep[i]];
+      w.localStorage && w.localStorage.setItem(SKEY, JSON.stringify(o));
+    } catch (e) {}
+  }
+  function syncNameMode() { H2.cfg.nameMode = (H2.cfg.names === "off") ? "off" : H2.cfg.names; }
+
+  function toggleRow(label, key) {
+    return '<div class="h2-set"><label>' + esc(label) + '</label><div class="h2-sw' + (H2.cfg[key] ? " on" : "") + '" data-toggle="' + key + '"></div></div>';
+  }
+  function renderSettings() {
+    var rec = UI.panels.settings; if (!rec) return;
+    var h = "";
+    h += '<div class="h2-set"><label>Villager names</label><select data-names>' +
+      ['off', 'hover', 'always'].map(function (o) { return '<option value="' + o + '"' + (H2.cfg.names === o ? " selected" : "") + '>' + titleCase(o) + '</option>'; }).join("") +
+      '</select></div>';
+    h += toggleRow("Selection outline", "outline");
+    h += toggleRow("Random events", "events");
+    h += toggleRow("Births", "birth");
+    h += toggleRow("War", "war");
+    h += toggleRow("Expansion", "expand");
+    h += toggleRow("Verbose log", "verbose");
+    h += '<div class="h2-set"><label>Max per faction</label><input type="number" min="1" max="500" step="1" value="' + clampN(H2.cfg.maxPerFaction, 1, 500) + '" data-num="maxPerFaction"></div>';
+    h += '<div class="h2-set"><label>Town size</label><input type="number" min="4" max="400" step="1" value="' + clampN(H2.cfg.townSize, 4, 400) + '" data-num="townSize"></div>';
+    h += '<div class="h2-muted" style="margin-top:8px">Settings are saved to your browser.</div>';
+    rec.body.innerHTML = h;
+  }
+
+  /* ============================================================== HELP */
+  function renderHelp() {
+    var rec = UI.panels.help; if (!rec) return;
+    rec.body.innerHTML =
+      '<div class="h2-help">' +
+      '<p><b>Humanitize 2</b> turns the sandbox into a living world of villagers, factions, settlements and war. Place a settler band and watch a civilisation grow.</p>' +
+      '<h4>Getting started</h4>' +
+      '<ul>' +
+      '<li>In the <b>Villagers</b> category, place <code>azure_party</code> or <code>crimson_party</code> — a band of settlers that founds a village.</li>' +
+      '<li>Single villager spawners place one <code>azure_villager</code> / <code>crimson_villager</code>.</li>' +
+      '<li>Pick the <b>Inspect</b> tool and tap any villager to open their card, or tap a building for info.</li>' +
+      '</ul>' +
+      '<h4>Villagers</h4>' +
+      '<p>Each person has a name, traits, needs (hunger, thirst, energy, mood, warmth), health & blood, a family, friendships and a <b>life story</b> of their notable moments. They age from child to adult to elder, marry, raise children and eventually die — of old age, violence, hunger, cold or plague.</p>' +
+      '<h4>Work & buildings</h4>' +
+      '<p>Villagers take jobs — farmer, woodcutter, miner, smith, builder, doctor, merchant, soldier — gathering resources and constructing homes, farms, wells, markets, halls and walls in each faction\'s own architectural style.</p>' +
+      '<h4>Settlements & expansion</h4>' +
+      '<p>Settlements grow up to the town-size cap, then send out settlers to found new colonies — up to <b>500 people per faction</b>. See every settlement in the <b>🏰 Factions</b> dashboard.</p>' +
+      '<h4>Trade</h4>' +
+      '<p>Markets set prices and merchants carry goods and coin between settlements.</p>' +
+      '<h4>Events</h4>' +
+      '<p>Random events spice up life: festivals, wandering traders, bandit raids and plagues. Toggle them in <b>⚙️ Settings</b>.</p>' +
+      '<h4>War & the military</h4>' +
+      '<p>Tension between the Azure and Crimson can escalate from wary to fortify, prepare, war and siege. Scouts gather intelligence (fog of war), soldiers drill at training dummies and earn experience, and armies are organised into <b>squads</b> (archers, infantry, musketeers) with <b>ranks</b> (Azure: Recruit → Huscarl → Veteran → Sergeant → Captain → Marshal; Crimson: Tiro → Legionary → Veteran → Optio → Centurion → Legate).</p>' +
+      '<p>A <b>war council</b> picks a strategy — assault, lightning raid, patient siege with guns or archer harassment; defenders hold the walls, sally out, arm a militia or shelter the people in the hall. Weapons and defences: swords, spears, bows, <b>fire arrows</b>, rifles, siege cannons, <b>sapper charges</b>, rocks dropped from towers, walls, palisades, towers and moats. <b>Morale</b> can break and send an army fleeing. Soldiers are paid, decorated with medals, retire as elders and are honoured at funerals; civilians form bucket lines to fight fires.</p>' +
+      '<p>Watch the <b>📜 Chronicle</b> for the story of each battle.</p>' +
+      '<h4>Leaders & elections</h4>' +
+      '<p>Every settlement elects a leader (Azure: Chieftain / High Jarl, Crimson: Consul / Doge) every six days or when the leader dies. Their temperament — hawk, dove or pragmatist — steers the council towards war or peace. The best soldier becomes Marshal / Legate. Heroes earn titles and medals that show up on their inspector card.</p>' +
+      ((H2.compat && H2.compat.length) ? '<h4>Detected mods</h4><ul>' + H2.compat.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' : '') +
+      (H2.oldMod ? '<p><b>⚠ The original Humanitize.js is loaded — please disable it.</b></p>' : '') +
+      '<h4>Interface</h4>' +
+      '<ul>' +
+      '<li><b>HUD</b> — day & time, faction populations, settlements and war status.</li>' +
+      '<li><b>Inspector</b> — full villager card with a scrollable life-story timeline; tap family names to jump between people.</li>' +
+      '<li><b>🏰 Factions</b> — populations, leaders, stores, buildings, armies and a population graph.</li>' +
+      '<li><b>📜 Chronicle</b> — the running history, filterable by faction or major events.</li>' +
+      '<li><b>⚙️ Settings</b> — names, outline, events and population caps (saved to your browser).</li>' +
+      '</ul>' +
+      '<p class="h2-muted">Tip: disable the original <code>Humanitize.js</code> mod to avoid conflicts — Humanitize 2 replaces it.</p>' +
+      '<p class="h2-muted">Humanitize 2 — a complete rewrite & expansion of the original <b>Humanitize.js</b> by <b>nekonico</b>.</p>' +
+      '</div>';
+  }
+
+  /* ============================================================ OPEN/CLOSE */
+  var RENDERERS = { inspector: renderInspector, hud: renderHud, dashboard: renderDashboard, chronicle: renderChronicle, settings: renderSettings, help: renderHelp };
+  UI.open = function (name) {
+    try {
+      ensureInit();
+      var rec = UI.panels[name]; if (!rec) return false;
+      rec.panel.style.display = "flex";
+      if (RENDERERS[name]) RENDERERS[name]();
+      return true;
+    } catch (e) { return false; }
+  };
+  UI.close = function (name) { try { var rec = UI.panels[name]; if (rec) rec.panel.style.display = "none"; } catch (e) {} };
+  UI.toggle = function (name) { var rec = UI.panels[name]; if (rec && rec.panel.style.display !== "none") UI.close(name); else UI.open(name); };
+  UI.isOpen = function (name) { var rec = UI.panels[name]; return !!(rec && rec.panel.style.display !== "none"); };
+  UI.refresh = function () {
+    try {
+      for (var name in UI.panels) if (UI.isOpen(name) && RENDERERS[name]) RENDERERS[name]();
+    } catch (e) {}
+  };
+
+  /* ============================================================ CANVAS DRAW */
+  function drawOverlay(ctx) {
+    try {
+      if (!ctx || typeof ctx.save !== "function") return;
+      var ps = (typeof w.pixelSize === "number" && w.pixelSize > 0) ? w.pixelSize : 6;
+      // selection outline (animated)
+      if (H2.cfg.outline !== false) {
+        var p = resolveSel();
+        if (p && !p.del && has(p.x) && has(p.y)) {
+          var t = (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now()) / 1000;
+          var a = 0.45 + 0.35 * Math.sin(t * 4);
+          var F = facOf(p.fac);
+          ctx.save();
+          ctx.globalAlpha = a;
+          ctx.strokeStyle = F.flag || "#fff";
+          ctx.lineWidth = Math.max(1, ps * 0.22);
+          var tall = (p.element === "hz_child") ? ps : ps * 2;
+          var topY = (p.element === "hz_child") ? p.y * ps : (p.y - 1) * ps;
+          ctx.strokeRect(p.x * ps - 1.5, topY - 1.5, ps + 3, tall + 3);
+          ctx.restore();
+        }
+      }
+      // name labels
+      var mode = H2.cfg.names || "hover";
+      if ((mode === "always" || mode === "hover") && ps >= 4) {
+        ctx.save();
+        ctx.font = Math.max(8, Math.round(ps * 1.1)) + "px 'Segoe UI',sans-serif";
+        ctx.textAlign = "center";
+        ctx.lineWidth = Math.max(2, ps * 0.3);
+        ctx.strokeStyle = "rgba(0,0,0,0.85)";
+        var drew = 0, CAP = 48;
+        if (mode === "always") {
+          var ppl = H2.people || [];
+          for (var i = 0; i < ppl.length && drew < CAP; i++) { if (labelPerson(ctx, ppl[i], ps)) drew++; }
+        }
+        // person under the mouse (hover + always)
+        if (w.mousePos) {
+          var hp = personNear(Math.round(w.mousePos.x), Math.round(w.mousePos.y), 1);
+          if (hp) labelPerson(ctx, hp, ps, true);
+        }
+        ctx.restore();
+      }
+    } catch (e) {}
+  }
+  function labelPerson(ctx, p, ps, force) {
+    if (!p || p.del || p.dead) return false;
+    if (typeof w.width === "number" && (p.x < 0 || p.x > w.width)) return false;
+    var label = (p.first || p.name || "").split(" ")[0];
+    if (!label) return false;
+    var F = facOf(p.fac);
+    var cx = (p.x + 0.5) * ps;
+    var cy = (p.y - 1) * ps - 2;
+    ctx.strokeText(label, cx, cy);
+    ctx.fillStyle = force ? "#ffffff" : (F.flag || "#fff");
+    ctx.fillText(label, cx, cy);
+    return true;
+  }
+
+  /* ============================================================ EVENTS */
+  function wireGlobalEvents() {
+    var d = w.document;
+    // delegated clicks inside the UI root
+    root.addEventListener("click", function (e) {
+      var t = e.target; if (!t) return;
+      var pid = t.getAttribute && t.getAttribute("data-pid");
+      if (pid) { UI.select(+pid); e.stopPropagation(); return; }
+      var op = t.getAttribute && t.getAttribute("data-open");
+      if (op) { UI.toggle(op); return; }
+      var cf = t.getAttribute && t.getAttribute("data-cf");
+      if (cf !== null && cf !== undefined) { UI.chronFilter = +cf; renderChronicle(); return; }
+      if (t.getAttribute && t.getAttribute("data-cmaj")) { UI.chronMajor = !UI.chronMajor; renderChronicle(); return; }
+      var tog = t.getAttribute && t.getAttribute("data-toggle");
+      if (tog) { H2.cfg[tog] = !H2.cfg[tog]; t.classList.toggle("on", !!H2.cfg[tog]); saveSettings(); return; }
+    });
+    root.addEventListener("change", function (e) {
+      var t = e.target; if (!t) return;
+      if (t.hasAttribute && t.hasAttribute("data-names")) { H2.cfg.names = t.value; syncNameMode(); saveSettings(); return; }
+      var num = t.getAttribute && t.getAttribute("data-num");
+      if (num) { var cap = num === "maxPerFaction" ? 500 : 400; H2.cfg[num] = clampN(t.value, 1, cap); t.value = H2.cfg[num]; saveSettings(); return; }
+    });
+    // Escape closes the top-most non-HUD panel
+    d.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape" && e.code !== "Escape") return;
+      var order = ["help", "settings", "chronicle", "dashboard", "inspector"];
+      for (var i = 0; i < order.length; i++) if (UI.isOpen(order[i])) { UI.close(order[i]); e.stopPropagation(); return; }
+    }, true);
+  }
+
+  /* ============================================================ TOOL ELEM */
+  function registerTool() {
+    try {
+      if (!w.elements || w.elements.hz_inspect) return;
+      w.elements.hz_inspect = {
+        name: "inspect",
+        color: ["#ffd166", "#06d6a0", "#4da3ff"],
+        category: "villagers",
+        canPlace: false,
+        excludeRandom: true,
+        state: "solid",
+        movable: false,
+        desc: "Humanitize inspector — tap a villager for their life story, or a building for info.",
+        tool: function (pixel) { UI.pickAt(pixel); },
+      };
+      // best-effort button registration if the engine already built its lists
+      if (typeof w.createElementButton === "function" && w.document && w.document.getElementById("category-villagers") && !w.document.getElementById("elementButton-hz_inspect")) {
+        try { w.createElementButton("hz_inspect"); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  /* ============================================================ SAMPLING */
+  function sampleHistory() {
+    try {
+      var fp = H2.facPop || {};
+      for (var i = 0; i < UI.hist.length; i++) { UI.hist[i].push(fp[i] || 0); if (UI.hist[i].length > 80) UI.hist[i].shift(); }
+    } catch (e) {}
+  }
+
+  /* ============================================================ INIT */
+  function ensureInit() {
+    if (UI._built) return;
+    var d = w.document;
+    if (!d || !d.body) return;      // DOM not ready yet
+    UI._built = true;
+    injectStyle();
+    makeRoot();
+    makePanel("hud", "Humanitize 2", { left: "50%", top: "8px" }).panel.classList.add("h2-hud");
+    makePanel("inspector", "Inspector", { right: "10px", top: "54px", width: "320px" });
+    makePanel("dashboard", "Factions", { left: "10px", top: "54px", width: "330px" });
+    makePanel("chronicle", "Chronicle", { right: "10px", bottom: "10px", width: "320px" });
+    makePanel("settings", "Settings", { left: "10px", bottom: "10px", width: "300px" });
+    makePanel("help", "Help & Overview", { left: "50%", top: "60px", width: "360px" });
+    UI.panels.help.panel.style.transform = "translateX(-50%)";
+    wireGlobalEvents();
+    renderHud();
+    UI.open("hud");
+  }
+
+  /* -------- hook into the engine -------- */
+  loadSettings();
+  registerTool();
+
+  try {
+    if (typeof w.runAfterLoad === "function") w.runAfterLoad(function () { try { ensureInit(); registerTool(); } catch (e) {} });
+  } catch (e) {}
+  // also try once the DOM is ready, in case runAfterLoad already fired
+  try {
+    if (w.document && w.document.body) ensureInit();
+    else if (w.document) w.document.addEventListener("DOMContentLoaded", function () { try { ensureInit(); } catch (e) {} });
+  } catch (e) {}
+
+  try {
+    if (typeof w.renderPostPixel === "function") w.renderPostPixel(function (ctx) { drawOverlay(ctx || w.ctx); });
+  } catch (e) {}
+
+  try {
+    if (typeof w.runEveryTick === "function") w.runEveryTick(function () {
+      try {
+        var t = tks();
+        if (t % 300 === 0) sampleHistory();
+        // light, throttled live refresh of whatever is open (~ every 15 ticks)
+        if (t % 15 === 0) {
+          if (UI.isOpen("inspector")) renderInspector();
+          if (UI.isOpen("hud")) renderHud();
+          if (UI.isOpen("dashboard")) renderDashboard();
+          if (UI.isOpen("chronicle")) renderChronicle();
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+
+  // Also run a wall-clock refresh (~4/s) for the inspector/hud while the sim is paused.
+  try {
+    if (typeof w.setInterval === "function") w.setInterval(function () {
+      try { if (UI.isOpen("inspector")) renderInspector(); if (UI.isOpen("hud")) renderHud(); } catch (e) {}
+    }, 250);
+  } catch (e) {}
+
+})();
+
+/* ======================================================================
+   COMPATIBILITY with other mods — every integration is guarded, so the
+   mod works the same with or without them.
+   ====================================================================== */
+H2.compat = [];
+function detectMods() {
+  const C = [];
+  const has = (k) => !!(elements && elements[k]);
+  if (has("cultured_human") || has("c_body")) {
+    H2.oldMod = true;
+    console.warn("[Humanitize2] The original Humanitize.js is also loaded. Please disable it: Humanitize 2 replaces it and the two will fight over the same ideas.");
+    chronicle("⚠ The original Humanitize.js is also loaded — please disable it in the Mod Manager, Humanitize 2 replaces it.", true);
+  }
+  if (has("left_bullet") && has("right_bullet")) C.push("weapons: riflemen fire real bullets" + (has("bombs_for_throwing_at_you_left") ? ", sappers throw bombs" : ""));
+  if (has("advanced_dough") || has("apple") || has("apple_jam")) C.push("aChefsDream: villagers eat its foods and gather apples");
+  if (typeof window.announceDeath === "function") C.push("death_count: villager deaths are counted");
+  if (has("slab") || has("wood_roof")) C.push("building: its blocks count as solid ground for houses");
+  if (has("acid_ice") || has("base_gas")) C.push("chem: chemical hazards hurt villagers");
+  if (has("aerogel")) C.push("nousersthings: compatible");
+  H2.compat = C;
+  if (C.length && H2.cfg.verbose) console.log("[Humanitize2] integrations: " + C.join("; "));
+}
+runAfterLoad(function () { try { detectMods(); } catch (e) { H2.lastError = e; } });
+
+// building mod: its slabs and roofs are walkable ground for site finding
+if (typeof GROUNDISH === "object") runAfterLoad(function () { for (const k of ["slab", "wood_roof"]) if (elements[k]) GROUNDISH[k] = 1; });
+
+// weapons mod: sappers throw its bombs instead of planting a powder keg when available
+const _breach2 = TASKS.breach;
+TASKS.breach = function (p, t) {
+  if (t.o && !t.o.del && p.id % 5 === 0 && elements.bombs_for_throwing_at_you_left && elements.bombs_for_throwing_at_you_right) {
+    const c = colById(p.col);
+    if (c && c.stock.powder >= 2 && Math.abs(t.o.x - p.x) <= 4 && Math.abs(t.o.x - p.x) >= 2 && pixelTicks > (p.charged || 0)) {
+      const d = Math.sign(t.o.x - p.x) || 1, bx = p.x + d, by = p.y - 2;
+      if (isEmpty(bx, by)) {
+        c.stock.powder -= 2; p.charged = pixelTicks + 600;
+        createPixel(d > 0 ? "bombs_for_throwing_at_you_right" : "bombs_for_throwing_at_you_left", bx, by);
+        life(p, "Hurled a bomb at the enemy defences.", "war"); p.xp = (p.xp || 0) + 4;
+        return;
+      }
+    }
+  }
+  return _breach2(p, t);
+};
+
+// aChefsDream: hungry villagers pick ripe apples from its fruit trees
+const _eat = TASKS.eat;
+if (_eat) TASKS.eat = function (p, t) {
+  if (elements.apple && !t.apple && !t.triedApple) {
+    t.triedApple = true;
+    const a = H2.findNear(p.x, p.y, 18, (o) => o.element === "apple");
+    if (a) t.apple = { x: a.x, y: a.y };
+  }
+  if (t.apple) {
+    const o = at(t.apple.x, t.apple.y);
+    if (!o || o.element !== "apple") { t.apple = null; return _eat(p, t); }
+    const r = goTo(p, o.x, o.y, 1, 4);
+    if (r === "fail") { t.apple = null; return; }
+    if (r === "arrive") { deletePixel(o.x, o.y); p.hu = Math.min(100, p.hu + 22); t.apple = null; if (!p.ateApple) { p.ateApple = true; life(p, "Picked a fresh apple from a tree.", "food"); } if (p.hu >= 85) return "done"; }
+    return;
+  }
+  return _eat(p, t);
 };
 
 /* ======================================================================

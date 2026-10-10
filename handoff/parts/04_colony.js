@@ -179,6 +179,7 @@ function score(p, j) {
 function setJob(p, j) {
   if (p.job === j) return;
   const old = p.job; p.job = j; p.task = null;
+  if (j !== "laborer" && !(p.jobsHad || (p.jobsHad = [])).includes(j)) { p.jobsHad.push(j); life(p, "Took up work as a " + j + ".", "job"); }
   if (j === "soldier" || j === "sentry") { if (!p.wpn) p.wpn = "spear"; p.color = bodyColor(p); }
   else if (old === "soldier" || old === "sentry") { p.color = bodyColor(p); }
   else if (j === "doctor" || old === "doctor") p.color = bodyColor(p);
@@ -187,6 +188,7 @@ function setJob(p, j) {
 H2.setJob = setJob;
 
 /* ---- colony think loop ---------------------------------------------------- */
+H2.colonyHooks = H2.colonyHooks || [];   // extra per-colony systems (army, trade, events) register here
 function colonyThink(c) {
   if (c.pop <= 0) {
     c.empty = (c.empty || 0) + 1;
@@ -200,6 +202,7 @@ function colonyThink(c) {
   if (H2.planBuild) H2.planBuild(c);
   if (H2.cfg.expand) tryExpand(c);
   if (H2.warThinkColony && H2.cfg.war) H2.warThinkColony(c);
+  for (const hk of H2.colonyHooks) { try { hk(c); } catch (e) { H2.lastError = e; if (H2.cfg.verbose) console.error("[Humanitize2]", e); } }
   burials(c);
 }
 function runColonies() {
@@ -272,7 +275,7 @@ function tryExpand(c) {
     for (const b of (H2.st.bed || [])) if (b.owner === p.id) { b.owner = 0; b.ownerName = ""; }
     if (!isChildPx(p) && p.job !== "laborer") setJob(p, "laborer");
     setTask(p, "migrate", { x: site.x, y: site.y }, 70);
-    addThought(p, "pioneer", 10, DAY);
+    addThought(p, "pioneer", 10, DAY); life(p, "Left " + c.name + " as a pioneer to found " + nc.name + ".", "found");
   }
   chronicle(chosen.size + " settlers leave " + c.name + " to found " + nc.name + ".", true, c.fac);
   census(true);

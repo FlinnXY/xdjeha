@@ -57,6 +57,7 @@ function spawnPerson(x, y, fac, o) {  // x,y = body cell; head at y-1
   if (h) { h.color = b.skin; h.fac = fac; }
   b.col = o.col || colonyFor(fac, x, y).id;
   const c = colById(b.col); if (c) c.pop = (c.pop || 0) + 1;
+  if (!o.born) life(b, "Arrived " + (c ? "at " + c.name : "in the land") + " as a " + (o.job || "settler") + ".", "found");
   return b;
 }
 function spawnChild(x, y, fac, o) {
@@ -81,6 +82,7 @@ function growUp(p) {
   const h = at(p.x, p.y - 1); if (!h) return false;
   h.color = color; h.fac = p.fac;
   changePixel(p, "hz_body", false);
+  life(p, "Came of age and joined the adults of " + ((colById(p.col) || {}).name || "the village") + ".", "age");
   p.color = bodyColor(p);
   chronicle(p.first + " " + p.sn + " came of age.", false, p.fac);
   return true;
@@ -196,6 +198,7 @@ function tryWalk(p, dx, reckless) {
   }
   if (shift(p, dx, 0) || shift(p, dx, -1) || shift(p, dx, 0, true) || shift(p, dx, -1, true)) { p.dir = dx; return true; }
   if (climb(p, dx)) { p.dir = dx; return true; }
+  if (shift(p, dx, 1)) { p.dir = dx; return true; }          // step down diagonally (off furniture, through a low door)
   return false;
 }
 // scramble up a ledge two cells high (slowly). Needs head room above the person and free space on the ledge.
@@ -242,15 +245,99 @@ function stairRoute(p, tx, ty) {
   return null;
 }
 H2.stairRoute = stairRoute;
+
+/* ---- path finding -------------------------------------------------------------
+   A breadth-first search over the cells a person can stand in (body + head free, something to stand on).
+   Moves: walk, step up one cell (with head room), climb a two-cell ledge, drop down up to four cells.
+   People are treated as passable (friends slip past each other). The result is only used to pick the
+   walking direction; the actual steps are still taken by tryWalk/shift. Paths are cached per target and
+   a small per-tick budget keeps hundreds of villagers cheap. */
+const PF = { budget: 0, tick: -1, MAXN: 9000 };
+function pfPass(x, y, p) {
+  if (x < 0 || x > width || y < 0 || y > height) return false;
+  const o = pixelMap[x][y];
+  if (!o || isPerson(o) || isSoft(o)) return true;
+  const k = kindOf(o);
+  if (k === 1) return true;
+  if (k === 3) { const e = elements[o.element]; if (e && (e.pass || e.stair)) return true; return o.element === "hz_gate" ? (o.fac === undefined || o.fac === p.fac) : (o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || !!H2.truce); }
+  return false;
+}
+function pfSupport(x, y) {
+  if (y + 1 > height) return true;
+  const o = pixelMap[x][y + 1];
+  if (!o || isPerson(o)) return false;
+  const e = elements[o.element];
+  if (e && e.stair) return true;
+  const k = kindOf(o); return k === 2 || (k === 1 && e && e.state === "liquid");
+}
+function findPath(p, tx, ty, range, vy) {
+  const ch = isChildPx(p);
+  const x0 = Math.max(1, Math.min(p.x, tx) - 30), x1 = Math.min(width - 1, Math.max(p.x, tx) + 30);
+  const W = x1 - x0 + 1, Hh = height + 1;
+  const stand = (x, y) => x >= x0 && x <= x1 && y >= 1 && y < height && pfPass(x, y, p) && (ch || pfPass(x, y - 1, p)) && pfSupport(x, y);
+  const prev = new Int32Array(W * Hh).fill(-2);
+  const idx = (x, y) => (x - x0) * Hh + y;
+  const q = new Int32Array(Math.min(W * Hh, PF.MAXN + 64));
+  let qh = 0, qt = 0;
+  const s = idx(p.x, p.y); prev[s] = -1; q[qt++] = s;
+  let goal = -1, n = 0;
+  while (qh < qt && n++ < PF.MAXN) {
+    const cur = q[qh++]; const cx = Math.floor(cur / Hh) + x0, cy = cur % Hh;
+    if (Math.abs(cx - tx) <= range && Math.abs(cy - ty) <= vy) { goal = cur; break; }
+    for (const dx of (tx >= cx ? [1, -1] : [-1, 1])) {
+      const nx = cx + dx; if (nx < x0 || nx > x1) continue;
+      const tryN = (ny) => { if (qt >= q.length) return; const k = idx(nx, ny); if (prev[k] !== -2) return; prev[k] = cur; q[qt++] = k; };
+      if (stand(nx, cy)) { tryN(cy); continue; }
+      // step up (needs head room above our own head)
+      if (stand(nx, cy - 1) && (ch ? pfPass(cx, cy - 1, p) : pfPass(cx, cy - 2, p))) { tryN(cy - 1); continue; }
+      // climb a two-cell ledge
+      if (!ch && stand(nx, cy - 2) && pfPass(cx, cy - 2, p) && pfPass(cx, cy - 3, p)) { tryN(cy - 2); continue; }
+      // step down diagonally (head passes where the body was level)
+      if (pfPass(nx, cy, p) && stand(nx, cy + 1) && !(stand(nx, cy))) tryN(cy + 1);
+      // drop down
+      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 4; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+    }
+  }
+  if (goal < 0) return null;
+  const pts = []; let c = goal;
+  while (c >= 0) { pts.push({ x: Math.floor(c / Hh) + x0, y: c % Hh }); c = prev[c]; }
+  pts.reverse();
+  return pts;
+}
+H2.findPath = findPath;
+// direction to walk according to the cached path (null when there is no usable path)
+function pathDir(p, tx, ty, range, vy) {
+  let P = p.path;
+  if (P && (Math.abs(P.tx - tx) > 2 || Math.abs(P.ty - ty) > 2 || pixelTicks - P.t > 400)) P = p.path = null;
+  if (P && P.pts) {
+    // where are we on the path? (look a few nodes ahead, people get swapped around a bit)
+    let i = -1;
+    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
+    if (i >= 0) { P.i = i; const nx = P.pts[i + 1]; return nx ? (Math.sign(nx.x - p.x) || p.dir || 1) : 0; }
+    P = p.path = null;     // knocked off the path: plan again
+  }
+  if (P && !P.pts && pixelTicks - P.t < 60) return null;          // recently found no path: keep the old behaviour for a while
+  if (pixelTicks - (p.pathT || -99) < 8) return null;
+  if (PF.tick !== pixelTicks) { PF.tick = pixelTicks; PF.budget = 10; }
+  if (PF.budget <= 0) return null;
+  PF.budget--; p.pathT = pixelTicks;
+  const pts = findPath(p, tx, ty, range, vy);
+  p.path = { tx: tx, ty: ty, t: pixelTicks, pts: pts, i: 0 };
+  if (!pts || pts.length < 2) return pts ? 0 : null;
+  return Math.sign(pts[1].x - p.x) || p.dir || 1;
+}
 function goTo(p, tx, ty, range, vy) {
   range = range === undefined ? 1 : range; vy = vy === undefined ? 3 : vy;
   if (Math.abs(tx - p.x) <= range && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }
+  if ((p.stk || 0) >= 2 && Math.abs(tx - p.x) <= range + 2 && Math.abs(ty - p.y) <= vy) { p.stk = 0; p.detour = 0; return "arrive"; }   // crowded spot: close enough
   p.tgx = tx; p.tgyy = ty;
-  const via = stairRoute(p, tx, ty);
+  const pd = pathDir(p, tx, ty, range, vy);
+  const via = pd === null ? stairRoute(p, tx, ty) : null;
   p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
+  if (pd !== null && p.path && p.path.pts) { const nx = p.path.pts[p.path.i + 1]; if (nx && nx.y < p.y) p.tgy = nx.y - 2; else if (nx) p.tgy = p.y; }   // stairs are steps only when the path climbs
   if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
-  let dir = Math.sign(dxT);
+  let dir = pd ? pd : Math.sign(dxT);
   if (p.detour > 0) { dir = p.dd; p.detour--; }
   else if (dir === 0) dir = p.dir || 1;
   p.wantDir = dir; p.wantT = pixelTicks;
@@ -260,7 +347,7 @@ function goTo(p, tx, ty, range, vy) {
   else {
     p.stk = (p.stk || 0) + 1;
     if (p.stk > 1 && clearObstacle(p, dir)) { p.stk = 0; p.fails = 0; }
-    else if (p.stk > 4) { p.dd = rnd() < 0.5 ? -dir : dir; if (p.detour > 0 && p.dd === dir) p.dd = -dir; p.detour = rint(5, 14); p.stk = 0; p.fails = (p.fails || 0) + 1; }
+    else if (p.stk > 4) { p.dd = rnd() < 0.5 ? -dir : dir; if (p.detour > 0 && p.dd === dir) p.dd = -dir; p.detour = pd ? rint(1, 4) : rint(5, 14); p.stk = 0; p.fails = (p.fails || 0) + 1; p.path = null; }
     if ((p.fails || 0) > 10) { p.fails = 0; return "fail"; }
   }
   return moved ? "moving" : "blocked";
@@ -310,9 +397,10 @@ function die(p, cause, killer, gone) {
   let who = nm(p) + " (" + age + "d)";
   let msg;
   if (killer && killer.id) {
-    killer.kills = (killer.kills || 0) + 1;
-    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
-    if (killer.kills === 8) { killer.title = "Legendary"; chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
+    killer.kills = (killer.kills || 0) + 1; killer.xp = (killer.xp || 0) + 12;
+    if (killer.fac !== p.fac) life(killer, "Slew " + nm(p) + " of the " + FAC[p.fac].name + "s in battle (kill #" + killer.kills + ").", "kill");
+    if (killer.kills === 3 && !killer.title) { killer.title = "Sir"; life(killer, "Hailed a hero after three victories.", "hero"); const kc = colById(killer.col); if (kc) kc.hero = nm(killer); chronicle(nm(killer) + " has slain three foes and is hailed a hero of the " + FAC[killer.fac].name + "!", true, killer.fac); }
+    if (killer.kills === 8) { killer.title = "Legendary"; life(killer, "Became a living legend (eight kills).", "hero"); chronicle(nm(killer) + " — eight kills — is now a living legend!", true, killer.fac); }
     msg = who + " was slain by " + nm(killer) + ".";
     H2.stats.battles++;
     addThought(killer, "killed", -4, DAY);
@@ -320,6 +408,7 @@ function die(p, cause, killer, gone) {
   } else if (verb) msg = who + " " + verb + ".";
   else msg = who + " met a violent end (" + p.cause + ").";
   chronicle(msg, p.cause !== "old age" && (stageOf(p) !== "elder"), p.fac);
+  life(p, "Died aged " + age + " days — " + (msg.indexOf(who) === 0 ? msg.slice(who.length + 1) : msg), "death");
   if (typeof window.announceDeath === "function" && !gone) { try { window.announceDeath(); } catch (e) {} } // death_count.js compatibility
   // loot
   if (p.coin > 0 && elements.gold_coin && !gone) { for (const d of [[0, 0], [1, 0], [-1, 0], [0, -1]]) { const x = p.x + d[0], y = p.y + d[1]; if (inb(x, y) && !pixelMap[x][y]) { createPixel("gold_coin", x, y); break; } } }
@@ -330,7 +419,7 @@ function die(p, cause, killer, gone) {
   if (!gone) { const h = ch ? null : headOf(p); if (h) { h.dead = pixelTicks; } p.color = "#8a8f8a"; }
 }
 function grieve(p) {
-  if (p.sp) { const s = H2.byId[p.sp]; if (s && !s.dead) { s.sp = 0; addThought(s, "widowed", -35, DAY * 3); chronicle(nm(s) + " is heartbroken at the loss of " + p.first + ".", false, s.fac); } }
+  if (p.sp) { const s = H2.byId[p.sp]; if (s && !s.dead) { s.sp = 0; addThought(s, "widowed", -35, DAY * 3); life(s, "Lost their spouse " + nm(p) + ".", "grief"); chronicle(nm(s) + " is heartbroken at the loss of " + p.first + ".", false, s.fac); } }
   for (const kid of (p.kids || [])) { const k = H2.byId[kid]; if (k && !k.dead) addThought(k, "grief", -20, DAY * 2); }
   for (const pa of (p.par || [])) { if (!pa) continue; const k = H2.byId[pa]; if (k && !k.dead) addThought(k, "grief", -22, DAY * 2); }
   for (const fid in (p.fr || {})) { const k = H2.byId[fid]; if (k && !k.dead && p.fr[fid] > 30) addThought(k, "grief", -12, DAY); }
@@ -426,7 +515,7 @@ function vitals(p) {
   if (p.th <= 0) { dmg += 0.9; cause = "thirst"; }
   if (p.bt < 34) { dmg += (34 - p.bt) * 0.35; cause = "cold"; } else if (p.bt > 39.5) { dmg += (p.bt - 39.5) * 0.5; cause = "heat"; }
   if (p.sub) { p.air -= 4; if (p.air <= 0) { dmg += 6; cause = "drowning"; } } else p.air = clamp(p.air + 10, 0, 100);
-  if (p.burning) { dmg += 3.5; cause = "fire"; p.panic = Math.max(p.panic, 6); }
+  if (p.burning) { dmg += 3.5; cause = "fire"; p.panic = Math.max(p.panic, 6); if (!p.burnStart) p.burnStart = pixelTicks; else if (pixelTicks - p.burnStart > 240 && rnd() < 0.25) { p.burning = false; delete p.burnStart; } }   // stop, drop and roll
   // neighbours: hazards / diseases
   for (let i = 0; i < 4; i++) {
     const nx = p.x + (i === 0 ? -1 : i === 1 ? 1 : 0), ny = p.y + (i === 2 ? 1 : i === 3 ? -1 : 0);
@@ -618,8 +707,8 @@ function drinkSource(p) {
 }
 TASKS.drink = function (p, t) {
   if (!t.src || (t.src.px && t.src.px.del)) { t.src = drinkSource(p); if (!t.src) { t.nofind = (t.nofind || 0) + 1; if (t.nofind > 15) return "fail"; return TASKS.wander(p, t); } }
-  const r = goTo(p, t.src.x, t.src.y, 1, 3);
-  if (r === "fail") { markBad(p, t.src.x, t.src.y); t.src = null; return; }
+  const r = goTo(p, t.src.x, t.src.y, t.src.well ? 2 : 1, 3);
+  if (r === "fail") { t.fl = (t.fl || 0) + 1; if (!t.src.well || t.fl > 2) markBad(p, t.src.x, t.src.y); t.src = null; return; }
   if (r === "arrive") {
     t.n = (t.n || 0) + 1;
     if (t.n % 3 === 0) { p.th = Math.min(100, p.th + 18); if (!t.src.well && rnd() < 0.15 && t.src.px && !t.src.px.del) deletePixel(t.src.px.x, t.src.px.y); }
@@ -759,13 +848,19 @@ function partyFor(fac) {
     onPlace: function (pixel) {
       const px = pixel.x, py = pixel.y; deletePixel(px, py);
       const jobs = ["builder", "woodcutter", "farmer", "miner", "soldier", "laborer"];
-      let made = 0, col = null;
+      let made = 0, col = null; const band = [];
       for (let i = 0; i < 6; i++) {
         const x = clamp(px + (i - 3) * 3 + rint(-1, 1), 1, width - 2);
         const gy = groundY(x, clamp(py - 8, 0, height - 3), 40);
         if (gy < 2) continue;
-        const b = spawnPerson(x, gy, fac, { job: jobs[i], age: rint(CHILD_T + DAY * 3, DAY * 12) });
-        if (b) { made++; col = colById(b.col); if (b.job === "soldier") b.wpn = "spear"; if (b.job === "soldier") b.color = bodyColor(b); }
+        const b = spawnPerson(x, gy, fac, { job: jobs[i], age: rint(CHILD_T + DAY * 3, DAY * 12), sex: i < 4 ? (i % 2 ? "f" : "m") : undefined });
+        if (b) { made++; band.push(b); col = colById(b.col); if (b.job === "soldier") b.wpn = "spear"; if (b.job === "soldier") b.color = bodyColor(b); }
+      }
+      // two founding couples travel with the band
+      for (let i = 0; i + 1 < band.length && i < 4; i += 2) {
+        const m = band[i], w = band[i + 1]; if (m.sex === w.sex || m.sp || w.sp) continue;
+        m.sp = w.id; w.sp = m.id; w.sn = m.sn; w.name = w.first + " " + w.sn; m.fr[w.id] = 70; w.fr[m.id] = 70;
+        life(m, "Set out with their spouse " + w.first + ".", "marry"); life(w, "Set out with their spouse " + m.first + ".", "marry");
       }
       if (made && col) { chronicle(made + " " + FAC[fac].name + " settlers arrive and look for a place to build a home.", true, fac); col.stock.wood += 15; }
     },
