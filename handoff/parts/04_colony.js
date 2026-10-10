@@ -145,6 +145,7 @@ function wantedJobs(c) {
   const mil = war === "peace" ? 0.1 : war === "wary" ? 0.16 : war === "fortify" ? 0.22 : war === "prepare" ? 0.38 : 0.45;
   W.soldier = a >= 4 ? Math.max(c.tension >= 1 ? 1 : 0, Math.round(a * (c.tension >= 1 ? mil : 0.06))) : 0;
   W.scout = (war === "wary" || war === "fortify" || war === "prepare") && a >= 6 ? 1 + (a >= 16 ? 1 : 0) : 0;
+  if (c.stock.bread + c.stock.grain * 0.5 < c.pop * 1.5) W.farmer = Math.max(W.farmer, Math.round(a * 0.4));   // stores running low: more hands in the fields
   if (c.famine) { W.farmer = Math.round(a * 0.45); W.soldier = Math.min(W.soldier, Math.round(a * 0.1)); }
   return W;
 }

@@ -185,6 +185,7 @@ function dropOk(x, y) { // is there something to stand on within 3 cells below (
   for (let k = 1; k <= 6; k++) {
     if (!inb(x, y + k)) return true;
     const o = pixelMap[x][y + k];
+    if (o && isPerson(o)) continue;                 // people are no floor: look at what they stand on
     if (o) { const kd = kindOf(o); return kd !== 4; }
   }
   return false;
@@ -514,6 +515,11 @@ function setTask(p, k, a, pri) {
 H2.setTask = setTask;
 function ownHome(p) { const b = p.home ? at(p.home.x, p.home.y) : null; return (b && b.element === "hz_bed" && b.owner === p.id) ? b : null; }
 
+function unstack(p) {
+  const pref = p.tgx !== undefined && pixelTicks - (p.tgT || -99) < 60 && p.tgx !== p.x ? Math.sign(p.tgx - p.x) : (rnd() < 0.5 ? -1 : 1);
+  for (const d of [pref, -pref]) if (shift(p, d, 0) || shift(p, d, 1)) { p.dir = d; return true; }
+  return false;
+}
 function physics(p) {
   const ch = isChildPx(p);
   const x = p.x, y = p.y;
@@ -533,6 +539,8 @@ function physics(p) {
     }
     p.fl = 0;
   } else if (kb === 1) p.fl = 0;
+  // never stand on somebody's head: step off the crowd towards where we were going
+  if (!onL && below && isPerson(below) && (pixelTicks + p.id) % 3 === 0) unstack(p);
   // swimming / drowning
   if (ch) return;
   const above = at(x, y - 2);
@@ -808,7 +816,24 @@ TASKS.eat = function (p, t) {
   // 3. colony stores / market
   const c = colById(p.col);
   if (c && H2.buyFood) { const r = H2.buyFood(p, c, t); if (r) return r; }
-  // 4. forage berries from plants? wander and look
+  // 4. empty stores: pick something ripe straight off the field (and sow it again)
+  if (!t.crop || t.crop.del) {
+    t.crop = null; let bd = 70;
+    for (const q of (H2.crops || [])) { if (q.del || q.g < 1 || isBad(p, q.x, q.y)) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y); if (d < bd) { bd = d; t.crop = q; } }
+    if (!t.crop) t.crop = H2.findNear(p.x, p.y, 30, (o) => o.element === "wheat" && !isBad(p, o.x, o.y));
+  }
+  if (t.crop) {
+    const r = goTo(p, t.crop.x, t.crop.y, 1, 3);
+    if (r === "fail") { markBad(p, t.crop.x, t.crop.y); t.crop = null; return; }
+    if (r === "arrive") {
+      const cx = t.crop.x, cy = t.crop.y, wasCrop = t.crop.element === "hz_crop";
+      deletePixel(cx, cy); t.crop = null; p.hu = Math.min(100, p.hu + (wasCrop ? 35 : 12));
+      if (wasCrop && inb(cx, cy + 1) && at(cx, cy + 1) && SOIL[at(cx, cy + 1).element]) createPixel("hz_crop", cx, cy);
+      if (p.hu > 70) return "done";
+    }
+    return;
+  }
+  // 5. nothing at all: wander and look
   t.look = (t.look || 0) + 1; if (t.look > 400) return "fail";
   return TASKS.wander(p, t);
 };
