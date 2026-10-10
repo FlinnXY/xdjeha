@@ -102,6 +102,7 @@ SANDBOXELS_SRC=... node t_events.js  # trade & events
 SANDBOXELS_SRC=... node t_perf.js    # performance
 SANDBOXELS_SRC=... node t20.js       # stuck detector
 SANDBOXELS_SRC=... node t_ladder.js  # quarry ladders / climbing
+SANDBOXELS_SRC=... node t_house.js [up]  # crowded townhouse: thirsty villager gets out
 SANDBOXELS_SRC=... node t_big.js 30000 450   # growth & expansion on a large map
 ```
 

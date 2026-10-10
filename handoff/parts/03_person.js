@@ -76,7 +76,12 @@ function legacyInit(p) { // a person pixel that did not come through spawnPerson
   const c = colonyFor(p.fac, p.x, p.y); p.col = c.id; c.pop = (c.pop || 0) + 1;
 }
 function growUp(p) {
-  if (!isEmpty(p.x, p.y - 1)) return false;
+  const ab = at(p.x, p.y - 1);
+  if (ab) {                                       // indoors: the walk-through backdrop of a house makes room for the new head
+    const e = elements[ab.element];
+    if (!(e && e.pass && !e.stair && !e.door)) return false;
+    openDoor(ab);
+  }
   const color = p.skin || pick(SKIN);
   createPixel("hz_head", p.x, p.y - 1);
   const h = at(p.x, p.y - 1); if (!h) return false;
@@ -124,9 +129,14 @@ function openDoorsFor(p, tx, ty) {
   if (o && kindOf(o) === 3 && doorOpenable(p, o)) openDoor(o);
 }
 function canSlipPast(p, ob) {
-  if (ob.sleeping || ob.id === undefined) return ob.dead && !ob.sleeping;
+  if (ob.id === undefined) return !!ob.dead;
+  if (ob.sleeping) {                       // step over somebody asleep on the floor; people in bed are only disturbed in an emergency
+    if (ob.fac !== p.fac && !ob.dead) return false;
+    const u = at(ob.x, ob.y + 1);
+    return !(u && (u.element === "hz_bed" || u.element === "hz_cot")) || !!(p.task && p.task.pri >= 60);
+  }
   if (!(ob.dead || ob.fac === p.fac || ob.fac === undefined || (ob.nomad && !hostileFac(p, ob)))) return false;
-  if (ob.wantDir === Math.sign(ob.x - p.x) && pixelTicks - (ob.wantT || -99) < 14) return false;   // they walk the same way: just follow
+  if (ob.wantDir === Math.sign(ob.x - p.x) && pixelTicks - (ob.wantT || -99) < 14 && (ob.stk || 0) < 2 && (ob.gs || 0) < 10) return false;   // they walk the same way: just follow (unless they are stuck)
   const busy = pixelTicks - (ob.wantT || -99) > 6 && ob.task && ob.task.k !== "wander";
   if (busy && p.tgx !== undefined && Math.abs(p.tgx - ob.x) <= 1 && Math.abs((p.tgyy === undefined ? ob.y : p.tgyy) - ob.y) <= 2) return false;   // that's their spot
   return true;
@@ -516,10 +526,37 @@ H2.setTask = setTask;
 function ownHome(p) { const b = p.home ? at(p.home.x, p.home.y) : null; return (b && b.element === "hz_bed" && b.owner === p.id) ? b : null; }
 
 function unstack(p) {
-  const pref = p.tgx !== undefined && pixelTicks - (p.tgT || -99) < 60 && p.tgx !== p.x ? Math.sign(p.tgx - p.x) : (rnd() < 0.5 ? -1 : 1);
-  for (const d of [pref, -pref]) if (shift(p, d, 0) || shift(p, d, 1)) { p.dir = d; return true; }
+  const ch = isChildPx(p), x = p.x, y = p.y;
+  const pref = p.tgx !== undefined && pixelTicks - (p.tgT || -99) < 60 && p.tgx !== x ? Math.sign(p.tgx - x) : (rnd() < 0.5 ? -1 : 1);
+  const free = (cx, cy) => { const o = at(cx, cy); return !o || !isPerson(o); };                // never hand the problem on to somebody else
+  for (const d of [pref, -pref]) {
+    for (const dy of [0, 1]) {
+      if (!free(x + d, y + dy) || (!ch && !free(x + d, y + dy - 1))) continue;
+      const fl = at(x + d, y + dy + 1); if (fl && isPerson(fl)) continue;
+      if (shift(p, d, dy)) { p.dir = d; return true; }
+    }
+  }
   return false;
 }
+// last resort for a person wedged on top of the crowd: squeeze into the nearest free standing spot close by
+function squeeze(p) {
+  const ch = isChildPx(p), h = ch ? null : headOf(p); if (!ch && !h) return false;
+  const pref = p.tgx !== undefined && p.tgx !== p.x ? Math.sign(p.tgx - p.x) : 1;
+  const room = (x, y) => { if (!inb(x, y)) return false; const o = pixelMap[x][y]; if (!o) return true; const e = elements[o.element]; return !!(e && e.pass && !e.stair && !e.door && !isPerson(o)); };
+  for (let d = 1; d <= 4; d++) for (const sd of [pref, -pref]) for (const dy of [0, 1, -1, 2, -2, 3]) {
+    const x = p.x + sd * d, y = p.y + dy;
+    if (!room(x, y) || (!ch && !room(x, y - 1))) continue;
+    const fl = at(x, y + 1); if (!fl || isPerson(fl)) continue;
+    const ek = kindOf(fl); if (!(ek === 2 || (elements[fl.element] && elements[fl.element].stair) || isLadder(x, y + 1))) continue;
+    for (const [cx, cy] of ch ? [[x, y]] : [[x, y], [x, y - 1]]) { const o = pixelMap[cx][cy]; if (o) openDoor(o); }
+    if (pixelMap[x][y] || (!ch && pixelMap[x][y - 1])) continue;
+    if (!ch) movePixel(h, x, y - 1);
+    movePixel(p, x, y); p.stack = 0; p.path = null; p.dir = sd;
+    return true;
+  }
+  return false;
+}
+H2.squeeze = squeeze;
 function physics(p) {
   const ch = isChildPx(p);
   const x = p.x, y = p.y;
@@ -540,7 +577,8 @@ function physics(p) {
     p.fl = 0;
   } else if (kb === 1) p.fl = 0;
   // never stand on somebody's head: step off the crowd towards where we were going
-  if (!onL && below && isPerson(below) && (pixelTicks + p.id) % 3 === 0) unstack(p);
+  if (!onL && below && isPerson(below)) { p.stack = (p.stack || 0) + 1; if ((pixelTicks + p.id) % 3 === 0 && !unstack(p) && p.stack > 12) squeeze(p); }
+  else p.stack = 0;
   // swimming / drowning
   if (ch) return;
   const above = at(x, y - 2);
@@ -815,11 +853,11 @@ TASKS.eat = function (p, t) {
   }
   // 3. colony stores / market
   const c = colById(p.col);
-  if (c && H2.buyFood) { const r = H2.buyFood(p, c, t); if (r) return r; }
+  if (c && H2.buyFood && !t.noStore) { const r = H2.buyFood(p, c, t); if (r === "busy") return; if (r === "fail") t.noStore = true; else if (r) return r; }
   // 4. empty stores: pick something ripe straight off the field (and sow it again)
   if (!t.crop || t.crop.del) {
     t.crop = null; let bd = 70;
-    for (const q of (H2.crops || [])) { if (q.del || q.g < 1 || isBad(p, q.x, q.y)) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y); if (d < bd) { bd = d; t.crop = q; } }
+    for (const q of (H2.crops || [])) { if (q.del || q.g < 1 || isBad(p, q.x, q.y) || (p.hu > 12 && c && H2.ownTerritory && !H2.ownTerritory(c, q.x))) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y); if (d < bd) { bd = d; t.crop = q; } }
     if (!t.crop) t.crop = H2.findNear(p.x, p.y, 30, (o) => o.element === "wheat" && !isBad(p, o.x, o.y));
   }
   if (t.crop) {

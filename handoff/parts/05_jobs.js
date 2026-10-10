@@ -289,7 +289,25 @@ function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 
 /* ---- farming -------------------------------------------------------------- */
 const SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, farmland: 1 };
+function farmSpotAt(c, x) {
+  if (H2.ownTerritory && !H2.ownTerritory(c, x)) return null;
+  if (onPit(x - 1, x + 1)) return null;
+  const gy = groundY(x, clamp(c.y - 10, 0, height - 2), 24);
+  if (gy < 1) return null;
+  const b = at(x, gy + 1); if (!b || !SOIL[b.element]) return null;
+  if (at(x - 1, gy) || at(x + 1, gy)) return null;
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -3; dy <= 0; dy++) { const o = at(x + dx, gy + dy); if (o && elements[o.element].hzb) return null; }
+  if (H2.reserved && H2.reserved(c, x, gy)) return null;
+  return { x: x, y: gy };
+}
 function farmSpot(p, c) {
+  const s = farmSpotRandom(p, c); if (s) return s;
+  // cramped town (map edge, quarry, neighbours): walk outwards until free farmland turns up
+  const from = rint(0, 1) ? 1 : -1;
+  for (let d = 4; d <= 100; d += 2) for (const side of [from, -from]) { const x = c.x + side * d; if (x < 2 || x > width - 3) continue; const q = farmSpotAt(c, x); if (q) return q; }
+  return null;
+}
+function farmSpotRandom(p, c) {
   for (let tries = 0; tries < 30; tries++) {
     // fields lie around the town (and in the gardens between its houses): up to ~30 cells beyond the built-up area
     const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.min(26, Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3) : 9;
@@ -314,8 +332,8 @@ TASKS.farm = function (p, t) {
   if (!t.crop || t.crop.del || !(t.crop.element === "wheat" || (t.crop.element === "hz_crop" && t.crop.g >= 1))) {
     t.crop = null;
     const list = H2.crops || [];
-    let best = null, bd = 60;
-    for (const q of list) { if (q.del || q.g < 1 || isBad(p, q.x, q.y)) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y) * 0.5; if (d < bd) { bd = d; best = q; } }
+    let best = null, bd = 110;
+    for (const q of list) { if (q.del || q.g < 1 || isBad(p, q.x, q.y) || (H2.ownTerritory && !H2.ownTerritory(c, q.x))) continue; const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y) * 0.5; if (d < bd) { bd = d; best = q; } }
     if (!best) best = H2.findNear(p.x, p.y, 15, (q) => q.element === "wheat");
     t.crop = best;
   }
@@ -332,7 +350,7 @@ TASKS.farm = function (p, t) {
   }
   // 2. plant new ones (until the field is large enough)
   const want = Math.round(c.pop * 1.4 + 6);
-  if ((H2.crops || []).filter((q) => !q.del && Math.abs(q.x - c.x) < 60).length < want) {
+  if ((H2.crops || []).filter((q) => !q.del && Math.abs(q.x - c.x) < 104 && (!H2.ownTerritory || H2.ownTerritory(c, q.x))).length < want) {
     if (!t.spot) { t.spot = farmSpot(p, c); if (!t.spot) { t.none = (t.none || 0) + 1; if (t.none > 6) return "fail"; return TASKS.wander(p, t); } }
     const r = goTo(p, t.spot.x, t.spot.y, 1, 3);
     if (r === "fail") { markBad(p, t.spot.x, t.spot.y); t.spot = null; return; }
@@ -543,15 +561,15 @@ H2.buyFood = function (p, c, t) {
   const tx = spot ? spot.x : c.x, ty = spot ? accY(spot) : c.y;
   const r = goTo(p, tx, ty, 3, 5);
   if (r === "fail") return "fail";
-  if (r !== "arrive") return null;
+  if (r !== "arrive") return "busy";
   const s = c.stock, child = isChildPx(p);
   const price = Math.max(1, Math.ceil(c.price.bread));
   const hasBread = s.bread >= 1, hasGrain = s.grain >= 1;
-  if (!hasBread && !hasGrain) { t.empty = (t.empty || 0) + 1; return t.empty > 3 ? "fail" : null; }
+  if (!hasBread && !hasGrain) { t.empty = (t.empty || 0) + 1; return t.empty > 3 ? "fail" : "busy"; }
   const takeFood = () => { if (hasBread) { s.bread -= 1; p.hu = Math.min(100, p.hu + 55); } else { s.grain -= 1; p.hu = Math.min(100, p.hu + 20); } };
   if (child || p.coin >= price) {
     if (!child) { p.coin -= price; s.coin += price; }
-    takeFood(); return p.hu > 75 ? "done" : null;
+    takeFood(); return p.hu > 75 ? "done" : "busy";
   }
   // can't pay
   if (p.hu < 18 && (trait(p, "g") > 0 || trait(p, "k") < 0 || p.mo < 30) && rnd() < 0.5) { // steal!
@@ -562,7 +580,7 @@ H2.buyFood = function (p, c, t) {
     return "done";
   }
   if (p.hu < 25) { takeFood(); addThought(p, "charity", -3, DAY); return "done"; }       // the hall gives relief to the hungry
-  t.empty = (t.empty || 0) + 1; return t.empty > 6 ? "fail" : null;
+  t.empty = (t.empty || 0) + 1; return t.empty > 6 ? "fail" : "busy";
 };
 H2.crimeThink = function (p, c) {
   if (p.wanted && pixelTicks - p.wanted > 1500) p.wanted = 0;

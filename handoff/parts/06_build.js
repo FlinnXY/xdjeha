@@ -55,7 +55,11 @@ const MAJOR_BUILD = { hall: 1, well: 1, market: 1, forge: 1, bakery: 1, hospital
 
 function costOfPlan(bp) { const c = {}; for (const cell of bp.cells) { const k = COST[cell[2]]; if (!k) continue; for (const g in k) c[g] = (c[g] || 0) + k[g]; } return c; }
 H2.costOfPlan = costOfPlan;
-function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) return false; return true; }
+function affordable(c, cost, frac) {
+  let swap = 0;
+  for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) { if (g === "stone") swap = (cost[g] * frac - Math.max(0, c.stock.stone)) * STONE_SWAP; else return false; }
+  return !swap || c.stock.wood - WOOD_RESERVE >= swap + (cost.wood || 0) * frac;
+}
 
 /* ---- site finding ---------------------------------------------------------- */
 const CLEARABLE = { wood: 1, tree_branch: 1, plant: 1, hz_sapling: 1, sapling: 1, dead_plant: 1, vine: 1 };
@@ -82,7 +86,7 @@ H2.reserved = function (c, x, y) { for (const pl of c.plans) if (x >= pl.x0 - 2 
 function findSite(c, w, opt) {
   opt = opt || {};
   const cx = opt.cx !== undefined ? opt.cx : (c.hall ? c.hall.x : c.x);
-  const range = opt.range || 55;
+  const range = opt.range || Math.min(110, 55 + (c.pop || 0) * 2);
   const lo = c.wallL !== undefined && !opt.outside ? c.wallL + 3 : 2, hi = c.wallR !== undefined && !opt.outside ? c.wallR - 3 : width - 3;
   const order = [0];
   for (let o = 2; o <= range; o += 2) { if (opt.side === 1) order.push(o, -o); else if (opt.side === -1) order.push(-o, o); else order.push(o, -o); }
@@ -124,10 +128,22 @@ function queuePlan(c, type, opt) {
     }
     // level the ground right outside both ends so people can walk straight in and out of the doors
     if (floor && site.ag && !opt.nomargin) {
-      [[-1, site.ag[0]], [bp.w, site.ag[1]]].forEach(([ax, g]) => {
-        if (g < 1 || g - site.y0 > 4 || site.y0 - g > 6) return;
-        for (let y = g + 1; y <= site.y0; y++) cells.push([ax, y - site.y0, "__dig"]);
-        for (let y = site.y0 + 1; y <= Math.max(site.y0 + 1, g); y++) cells.push([ax, y - site.y0, "hz_earth", bp.pathC ? { c: shade(bp.pathC) } : undefined]);
+      // a gentle ramp (one cell per column) instead of a single deep cut or pillar: no trenches for people to get stuck in
+      const wx = (cx) => site.x0 + (opt.mirror ? bp.w - 1 - cx : cx);          // world column of a (pre-mirror) cell column
+      const hzbNear = (x, y0, y1) => { for (let y = Math.max(0, y0); y <= Math.min(height, y1); y++) { const o = inb(x, y) ? pixelMap[x][y] : null; if (o && !o.dec && elements[o.element] && elements[o.element].hzb) return true; } return false; };
+      [[-1, -1], [bp.w, 1]].forEach(([ax, sd]) => {
+        const g0 = columnGround(wx(ax));
+        if (g0 < 1 || g0 - site.y0 > 4 || site.y0 - g0 > 6) return;
+        const mode = g0 < site.y0 ? -1 : g0 > site.y0 ? 1 : 0;                  // -1: cut into higher ground, 1: build up lower ground
+        for (let k = 0; k <= 6; k++) {
+          const cx = ax + sd * k, x = wx(cx); if (x < 1 || x >= width - 1) break;
+          const g = k === 0 ? g0 : columnGround(x); if (g < 1) break;
+          const T = site.y0 + mode * k;                                               // stand level wanted in this column
+          if (mode < 0 ? g >= T : mode > 0 ? g <= T : k > 0) break;                   // the ramp meets the natural ground
+          if (k > 0 && hzbNear(x, Math.min(g, T) - 2, Math.max(g, T) + 1)) break;    // never undermine / bury a neighbour
+          if (mode < 0) for (let y = g + 1; y <= T; y++) cells.push([cx, y - site.y0, "__dig"]);
+          if (mode >= 0 || k === 0) for (let y = T + 1; y <= Math.max(T + 1, g); y++) cells.push([cx, y - site.y0, "hz_earth", bp.pathC ? { c: shade(bp.pathC) } : undefined]);
+        }
       });
       // clear the head room above the approach as well (plants, loose earth)
       for (const ax of [-1, bp.w]) for (let dy = -2; dy <= 0; dy++) cells.push([ax, dy, "__dig"]);
@@ -151,9 +167,8 @@ function planBuild(c) {
     if (pl.li !== pl.i) { pl.li = pl.i; pl.lt = pixelTicks; }
     else if (pl.state === "ready" && pixelTicks - (pl.lt || pl.t0) > 1500) { pl.i++; pl.lt = pixelTicks; }   // watchdog: skip a cell nobody can reach
     if (pl.i >= pl.cells.length) continue;
-    const next = pl.cells[pl.i]; const need = COST[next[2]];
-    let ok = true; if (need) for (const g in need) if ((c.stock[g] || 0) < need[g]) ok = false;
-    pl.state = ok ? "ready" : "stalled";
+    const next = pl.cells[pl.i];
+    pl.state = canPay(c, COST[next[2]]) ? "ready" : "stalled";
   }
   if (c.plans.length >= 2) return;
   const s = c.stock, pop = c.pop, adults = c.adults || 0;
@@ -249,6 +264,22 @@ function completePlan(c, pl) {
 }
 
 // create one blueprint cell in the world, with its colour and settlement metadata
+// building materials: when the quarry cannot keep up, a wealthy wood store trades for stone (2 wood per stone)
+const STONE_SWAP = 2, WOOD_RESERVE = 25;
+function canPay(c, need) {
+  if (!need) return true;
+  for (const g in need) if ((c.stock[g] || 0) < need[g] && !(g === "stone" && c.stock.wood - WOOD_RESERVE >= (need[g] - Math.max(0, c.stock.stone)) * STONE_SWAP + (need.wood || 0))) return false;
+  return true;
+}
+function payFor(c, need) {
+  if (!canPay(c, need)) return false;
+  for (const g in need) {
+    if (g === "stone" && c.stock.stone < need.stone) { const have = Math.max(0, c.stock.stone); c.stock.stone -= have; c.stock.wood -= (need.stone - have) * STONE_SWAP; }
+    else c.stock[g] -= need[g];
+  }
+  return true;
+}
+H2.canPay = canPay;
 function placeCell(c, pl, cell) {
   const el = cell[2], cx = pl.x0 + cell[0], cy = pl.y0 + cell[1];
   if (!inb(cx, cy) || !elements[el]) return null;
@@ -335,9 +366,7 @@ TASKS.build = function (p, t) {
     if (el === "water" && oi.state === "liquid") { pl.i++; return; }
     deletePixel(cx, cy);                                                                      // clear brush, leaves, loose stuff
   }
-  const need = COST[el] || {};
-  for (const g in need) if ((c.stock[g] || 0) < need[g]) { pl.state = "stalled"; return "done"; }
-  for (const g in need) c.stock[g] -= need[g];
+  if (!payFor(c, COST[el])) { pl.state = "stalled"; return "done"; }
   placeCell(c, pl, cell);
   pl.i++; p.sk.build += 0.05; (pl.helpers || (pl.helpers = {}))[p.id] = 1;
 };
