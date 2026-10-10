@@ -124,7 +124,7 @@ function fellTree(p, base) {
   }
   const bx = base.x, by = base.y;
   for (const o of q) if (o && !o.del) { if (o.element === "plant" && rnd() < 0.15) { /* leave a few leaves */ continue; } deletePixel(o.x, o.y); }
-  const yield_ = clamp(Math.ceil(wood / 2) + 1, 2, 9);
+  const yield_ = clamp(wood + 2, 3, 14);
   p.inv.wood = (p.inv.wood || 0) + yield_;
   p.sk.wood++;
   // replant a managed sapling (never right inside the village)
@@ -182,9 +182,9 @@ function exposedRock(p, c) {
 function planQuarry(c) {
   const order = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
-    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;         // always well outside the built-up town (room to grow)
-    for (let d = Math.max(28, e); d <= Math.max(60, e + 30); d += 4) order.push(c.x + side * d);
-    for (let d = Math.max(28, e) - 6; d >= 18; d -= 4) order.push(c.x + side * d);    // cramped land: closer is better than nothing
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // just outside the built-up town (short walks for miners)
+    for (let d = Math.max(16, e); d <= Math.max(48, e + 26); d += 3) order.push(c.x + side * d);
+    for (let d = Math.max(16, e) - 3; d >= 10; d -= 3) order.push(c.x + side * d);    // cramped land: closer is better than nothing
   }
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
@@ -246,13 +246,17 @@ TASKS.mine = function (p, t) {
     Q.i++; cell = Q.cells[Q.i];
   }
   if (!cell) return "done";
-  const r = goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
+  // stall guard: a cell nobody can reach is skipped; a pit that keeps stalling is abandoned for a fresh one
+  if (Q.lastI !== Q.i) { Q.lastI = Q.i; Q.stall = 0; }
+  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { c.quarry = null; return "done"; } return; }
+  const reach = Math.abs(p.x - cell[0]) <= 2 && Math.abs(p.y - cell[1]) <= 2 && p.y <= cell[1] + 1;
+  const r = reach ? "arrive" : goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
   if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }
   if (r !== "arrive") return;
   t.n = (t.n || 0) + 1;
   const o = at(cell[0], cell[1]); if (!o) { Q.i++; return; }
   if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) {
-    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++;
+    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++; Q.skips = 0;
     // remember the open pit so nobody builds on its edge
     const pits = c.pits || (c.pits = []); const last = Q.pit;
     if (last) { last[0] = Math.min(last[0], o.x); last[1] = Math.max(last[1], o.x); } else { Q.pit = [o.x, o.x]; pits.push(Q.pit); }
@@ -267,10 +271,12 @@ function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 /* ---- farming -------------------------------------------------------------- */
 const SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, farmland: 1 };
 function farmSpot(p, c) {
-  for (let tries = 0; tries < 12; tries++) {
-    // fields lie around the town, not in it: between the edge of the built-up area and 30 cells beyond
-    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3 : 9;
-    const x = clamp(c.x + side * rint(e, e + 30), 2, width - 3);
+  for (let tries = 0; tries < 30; tries++) {
+    // fields lie around the town (and in the gardens between its houses): up to ~30 cells beyond the built-up area
+    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.min(26, Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3) : 9;
+    const x = clamp(c.x + side * (tries % 3 === 2 ? rint(4, e) : rint(e, e + 30)), 2, width - 3);
+    if (H2.ownTerritory && !H2.ownTerritory(c, x)) continue;
+    if (onPit(x - 1, x + 1)) continue;
     const gy = groundY(x, clamp(c.y - 10, 0, height - 2), 24);
     if (gy < 1) continue;
     const b = at(x, gy + 1); if (!b || !SOIL[b.element]) continue;

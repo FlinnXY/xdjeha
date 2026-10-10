@@ -135,7 +135,7 @@ function wantedJobs(c) {
   const a = c.adults, W = {};
   const war = c.war.state;
   W.farmer = Math.max(1, Math.round(a * 0.3));
-  W.woodcutter = Math.max(1, Math.round(a * 0.17));
+  W.woodcutter = Math.max(1, Math.round(a * (c.stock.wood < 25 ? 0.26 : 0.17)));
   W.miner = Math.max(1, Math.round(a * 0.12));
   W.builder = Math.max(c.plans.length && a >= 4 ? 2 : 1, Math.round(a * (c.plans.length ? (c.beds < c.pop || !c.hall ? 0.32 : 0.25) : 0.12)));
   const hasOven = stationsOf("oven", c).length > 0, hasForge = stationsOf("forge", c).length > 0, hasHosp = stationsOf("hospital", c).length > 0 || a >= 8;

@@ -320,7 +320,7 @@ def("hz_sapling", { color: ["#3f8f2a","#4a9e33"], behavior: behaviors.WALL, dens
     if (!b) { tryMove(p, p.x, p.y + 1); return; }
     if (!TREE_SOIL[b.element]) { if (rnd() < 0.002) deletePixel(p.x, p.y); return; }
     if (pixelTicks % 10 !== 0) return;
-    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.0006 : 0.0035);
+    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.001 : 0.006);
     if (p.g < 1) return;
     growTree(p);
   } });
@@ -1052,6 +1052,8 @@ function drinkSource(p) {
 }
 TASKS.drink = function (p, t) {
   if (!t.src || (t.src.px && t.src.px.del)) { t.src = drinkSource(p); if (!t.src) { t.nofind = (t.nofind || 0) + 1; if (t.nofind > 15) return "fail"; return TASKS.wander(p, t); } }
+  t.tk = (t.tk || 0) + 1;
+  if (t.tk % 350 === 0) { if (!t.src.well) markBad(p, t.src.x, t.src.y); t.src = null; if (t.tk > 1400) return "fail"; return; }   // never trudge forever
   const r = goTo(p, t.src.x, t.src.y, t.src.well ? 2 : 1, 3);
   if (r === "fail") { t.fl = (t.fl || 0) + 1; if (!t.src.well || t.fl > 2) markBad(p, t.src.x, t.src.y); t.src = null; return; }
   if (r === "arrive") {
@@ -1353,7 +1355,7 @@ function wantedJobs(c) {
   const a = c.adults, W = {};
   const war = c.war.state;
   W.farmer = Math.max(1, Math.round(a * 0.3));
-  W.woodcutter = Math.max(1, Math.round(a * 0.17));
+  W.woodcutter = Math.max(1, Math.round(a * (c.stock.wood < 25 ? 0.26 : 0.17)));
   W.miner = Math.max(1, Math.round(a * 0.12));
   W.builder = Math.max(c.plans.length && a >= 4 ? 2 : 1, Math.round(a * (c.plans.length ? (c.beds < c.pop || !c.hall ? 0.32 : 0.25) : 0.12)));
   const hasOven = stationsOf("oven", c).length > 0, hasForge = stationsOf("forge", c).length > 0, hasHosp = stationsOf("hospital", c).length > 0 || a >= 8;
@@ -1631,7 +1633,7 @@ function fellTree(p, base) {
   }
   const bx = base.x, by = base.y;
   for (const o of q) if (o && !o.del) { if (o.element === "plant" && rnd() < 0.15) { /* leave a few leaves */ continue; } deletePixel(o.x, o.y); }
-  const yield_ = clamp(Math.ceil(wood / 2) + 1, 2, 9);
+  const yield_ = clamp(wood + 2, 3, 14);
   p.inv.wood = (p.inv.wood || 0) + yield_;
   p.sk.wood++;
   // replant a managed sapling (never right inside the village)
@@ -1689,9 +1691,9 @@ function exposedRock(p, c) {
 function planQuarry(c) {
   const order = [];
   for (const side of (c.groveSide ? [-c.groveSide, c.groveSide] : [1, -1])) {
-    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 12 : 0;         // always well outside the built-up town (room to grow)
-    for (let d = Math.max(28, e); d <= Math.max(60, e + 30); d += 4) order.push(c.x + side * d);
-    for (let d = Math.max(28, e) - 6; d >= 18; d -= 4) order.push(c.x + side * d);    // cramped land: closer is better than nothing
+    const e = c.ext ? (side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 8 : 0;          // just outside the built-up town (short walks for miners)
+    for (let d = Math.max(16, e); d <= Math.max(48, e + 26); d += 3) order.push(c.x + side * d);
+    for (let d = Math.max(16, e) - 3; d >= 10; d -= 3) order.push(c.x + side * d);    // cramped land: closer is better than nothing
   }
   // prefer a long, deep cut; on cramped land settle for a smaller pit
   for (const L of [20, 13, 8]) for (const x0 of order) {
@@ -1753,13 +1755,17 @@ TASKS.mine = function (p, t) {
     Q.i++; cell = Q.cells[Q.i];
   }
   if (!cell) return "done";
-  const r = goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
+  // stall guard: a cell nobody can reach is skipped; a pit that keeps stalling is abandoned for a fresh one
+  if (Q.lastI !== Q.i) { Q.lastI = Q.i; Q.stall = 0; }
+  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { c.quarry = null; return "done"; } return; }
+  const reach = Math.abs(p.x - cell[0]) <= 2 && Math.abs(p.y - cell[1]) <= 2 && p.y <= cell[1] + 1;
+  const r = reach ? "arrive" : goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
   if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }
   if (r !== "arrive") return;
   t.n = (t.n || 0) + 1;
   const o = at(cell[0], cell[1]); if (!o) { Q.i++; return; }
   if (t.n >= (isStony(o) ? 7 : 3) - Math.min(3, Math.floor(p.sk.mine / 10))) {
-    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++;
+    t.n = 0; deletePixel(o.x, o.y); mineYield(p, o, c); Q.i++; Q.skips = 0;
     // remember the open pit so nobody builds on its edge
     const pits = c.pits || (c.pits = []); const last = Q.pit;
     if (last) { last[0] = Math.min(last[0], o.x); last[1] = Math.max(last[1], o.x); } else { Q.pit = [o.x, o.x]; pits.push(Q.pit); }
@@ -1774,10 +1780,12 @@ function isFree(x, y) { return inb(x, y) && !pixelMap[x][y]; }
 /* ---- farming -------------------------------------------------------------- */
 const SOIL = { dirt: 1, grass: 1, soil: 1, mud: 1, farmland: 1 };
 function farmSpot(p, c) {
-  for (let tries = 0; tries < 12; tries++) {
-    // fields lie around the town, not in it: between the edge of the built-up area and 30 cells beyond
-    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3 : 9;
-    const x = clamp(c.x + side * rint(e, e + 30), 2, width - 3);
+  for (let tries = 0; tries < 30; tries++) {
+    // fields lie around the town (and in the gardens between its houses): up to ~30 cells beyond the built-up area
+    const side = rnd() < 0.5 ? -1 : 1, e = c.ext ? Math.min(26, Math.max(8, side > 0 ? c.ext[1] - c.x : c.x - c.ext[0]) + 3) : 9;
+    const x = clamp(c.x + side * (tries % 3 === 2 ? rint(4, e) : rint(e, e + 30)), 2, width - 3);
+    if (H2.ownTerritory && !H2.ownTerritory(c, x)) continue;
+    if (onPit(x - 1, x + 1)) continue;
     const gy = groundY(x, clamp(c.y - 10, 0, height - 2), 24);
     if (gy < 1) continue;
     const b = at(x, gy + 1); if (!b || !SOIL[b.element]) continue;
@@ -3909,12 +3917,14 @@ function keepT(c, g) {
 function priceOf(c, g) { const p = c.price && c.price[g]; return p !== undefined ? p : (BASE_PRICE[g] || 2); }
 function partnerNeed(o, g) { return o ? Math.max(0, lowT(o, g) - (o.stock[g] || 0)) : 0; }
 
-// the spot where outsiders do business: a market stall, else the hall, else the centre
+// the spot where outsiders do business: a market stall, else the hall, else the centre.
+// snap to a standable ground cell so goTo can actually arrive.
 function tradeSpot(o) {
   const m = H2.nearestOf(stationsOf("market", o, 180), o.x, o.y, 400);
-  if (m) return { x: m.x, y: accY(m) };
+  if (m) { const gy = groundY(m.x, 2, height - 3); return { x: m.x, y: gy > 2 ? gy : accY(m) }; }
   if (o.hall) return { x: o.hall.x, y: o.hall.y };
-  return { x: o.x, y: o.y };
+  const gy = groundY(o.x, 2, height - 3);
+  return { x: o.x, y: gy > 2 ? gy : o.y };
 }
 
 // choose the best settlement to trade with (same faction always; a rival only
@@ -4171,8 +4181,8 @@ function startFestival(x) {
   let attend = 0;
   for (const p of mine) {
     if (attend >= 20) break;
-    if (p.task && (p.task.pri || 0) > 40) continue;
-    if (setTask(p, "festival", { until: c.festival, sx: square.x, sy: square.y }, 34)) { addThought(p, "festival", 10, dur); attend++; }
+    if (p.task && (p.task.pri || 0) > 60) continue;
+    if (setTask(p, "festival", { until: c.festival, sx: square.x, sy: square.y }, 44)) { addThought(p, "festival", 10, dur); attend++; }
   }
   const sample = mine.slice().sort(() => rnd() - 0.5).slice(0, 4);
   for (const p of sample) life(p, "Danced at the harvest festival", "");

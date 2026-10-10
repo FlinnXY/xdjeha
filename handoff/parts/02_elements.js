@@ -164,7 +164,7 @@ def("hz_sapling", { color: ["#3f8f2a","#4a9e33"], behavior: behaviors.WALL, dens
     if (!b) { tryMove(p, p.x, p.y + 1); return; }
     if (!TREE_SOIL[b.element]) { if (rnd() < 0.002) deletePixel(p.x, p.y); return; }
     if (pixelTicks % 10 !== 0) return;
-    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.0006 : 0.0035);
+    p.g = (p.g || 0) + (p.temp < 3 || p.temp > 45 ? 0.001 : 0.006);
     if (p.g < 1) return;
     growTree(p);
   } });

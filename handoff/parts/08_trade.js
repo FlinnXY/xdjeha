@@ -45,12 +45,14 @@ function keepT(c, g) {
 function priceOf(c, g) { const p = c.price && c.price[g]; return p !== undefined ? p : (BASE_PRICE[g] || 2); }
 function partnerNeed(o, g) { return o ? Math.max(0, lowT(o, g) - (o.stock[g] || 0)) : 0; }
 
-// the spot where outsiders do business: a market stall, else the hall, else the centre
+// the spot where outsiders do business: a market stall, else the hall, else the centre.
+// snap to a standable ground cell so goTo can actually arrive.
 function tradeSpot(o) {
   const m = H2.nearestOf(stationsOf("market", o, 180), o.x, o.y, 400);
-  if (m) return { x: m.x, y: accY(m) };
+  if (m) { const gy = groundY(m.x, 2, height - 3); return { x: m.x, y: gy > 2 ? gy : accY(m) }; }
   if (o.hall) return { x: o.hall.x, y: o.hall.y };
-  return { x: o.x, y: o.y };
+  const gy = groundY(o.x, 2, height - 3);
+  return { x: o.x, y: gy > 2 ? gy : o.y };
 }
 
 // choose the best settlement to trade with (same faction always; a rival only

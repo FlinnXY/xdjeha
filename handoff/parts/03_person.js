@@ -707,6 +707,8 @@ function drinkSource(p) {
 }
 TASKS.drink = function (p, t) {
   if (!t.src || (t.src.px && t.src.px.del)) { t.src = drinkSource(p); if (!t.src) { t.nofind = (t.nofind || 0) + 1; if (t.nofind > 15) return "fail"; return TASKS.wander(p, t); } }
+  t.tk = (t.tk || 0) + 1;
+  if (t.tk % 350 === 0) { if (!t.src.well) markBad(p, t.src.x, t.src.y); t.src = null; if (t.tk > 1400) return "fail"; return; }   // never trudge forever
   const r = goTo(p, t.src.x, t.src.y, t.src.well ? 2 : 1, 3);
   if (r === "fail") { t.fl = (t.fl || 0) + 1; if (!t.src.well || t.fl > 2) markBad(p, t.src.x, t.src.y); t.src = null; return; }
   if (r === "arrive") {
