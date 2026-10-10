@@ -4,8 +4,8 @@
 //  1. Settings > Canvas Size gets a new option, "Even Wider": the scene
 //     is twice as wide as "Wide" and exactly as tall as "Wide". It is NOT
 //     squeezed onto the screen - pan across it with the middle mouse button.
-//  2. Ctrl + mouse wheel = SMOOTH zoom (0.5x - 32x), centred on the cursor.
-//     The plain wheel still changes the brush size, exactly like vanilla.
+//  2. Mouse wheel = SMOOTH zoom (0.5x - 32x), centred on the cursor.
+//     Ctrl + wheel changes the brush size.
 //  3. Hold the MIDDLE mouse button and drag to pan. You can pan the scene
 //     out past the edges of the view. A middle-click without dragging still
 //     picks the element, like in vanilla.
@@ -27,7 +27,7 @@
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 32;
   const WHEEL_SENS = 0.0018;   // ln-zoom per wheel pixel (one 100px notch is about x1.2)
-  const PINCH_SENS = 0.01;     // trackpad pinch (small fractional ctrl + wheel deltas)
+  const PINCH_SENS = 0.01;     // trackpad pinch (ctrl + small fractional wheel deltas)
   const SMOOTH_MS = 90;        // zoom smoothing time constant (lower = snappier)
   const PAN_CLICK_PX = 4;      // middle-drag shorter than this counts as a click
   const EDGE_MARGIN = 120;     // px of the scene that always stay inside the view when panning
@@ -280,19 +280,33 @@
     return t === canvasEl || t === viewEl || (t && (t.id === "logDiv" || t.id === "logText"));
   }
 
-  function onWheel(e) {
-    // Only Ctrl + wheel zooms. A plain wheel is left completely alone, so the
-    // game's own handler keeps changing the brush size exactly like vanilla.
-    if (!e.ctrlKey || !inView(e) || menuOpen()) return;
-    e.preventDefault();                          // also stops the browser's own page zoom
-    e.stopPropagation();
+  let lastBrushScroll = 0;
 
-    if (document.activeElement === slider) slider.blur();
+  function onWheel(e) {
+    if (!inView(e) || menuOpen()) return;
+    e.preventDefault();                          // also stops the browser's own page zoom
+    e.stopPropagation();                         // keep the game's own wheel handler out
+
     let dy = e.deltaY || e.deltaX;
     if (e.deltaMode === 1) dy *= 33;             // lines -> px
     else if (e.deltaMode === 2) dy *= window.innerHeight;
-    // Trackpad pinch arrives as small fractional ctrl+wheel deltas: zoom faster for those.
-    const pinch = Math.abs(dy) < 40 && dy !== Math.round(dy);
+    // Trackpad pinch arrives as ctrl + small fractional deltas: that stays a zoom.
+    const pinch = e.ctrlKey && Math.abs(dy) < 40 && dy !== Math.round(dy);
+
+    if (e.ctrlKey && !pinch) {                   // Ctrl + wheel: brush size, same rules as vanilla
+      const now = Date.now();
+      if (now - lastBrushScroll < 25) return;
+      lastBrushScroll = now;
+      let d = dy;
+      if (settings.invertscroll) d = d > 0 ? 1 : -1;
+      else d = d < 0 ? 1 : -1;
+      mouseSize += Math.round(d);
+      checkMouseSize(Math.sign(d));
+      return;
+    }
+
+    // Plain wheel: smooth zoom around the cursor.
+    if (document.activeElement === slider) slider.blur();
     const dir = settings.invertscroll ? 1 : -1;  // wheel up = zoom in
     zoomBy(dy * (pinch ? PINCH_SENS : WHEEL_SENS) * dir, e.clientX, e.clientY);
   }
@@ -376,7 +390,7 @@
     if (bar) {
       const wrap = document.createElement("span");
       wrap.id = "swzp-zoom-wrap";
-      wrap.title = "Zoom: Ctrl + mouse wheel or this slider. Pan: hold the middle mouse button and drag.";
+      wrap.title = "Zoom: mouse wheel or this slider. Brush size: Ctrl + wheel. Pan: hold the middle mouse button and drag.";
 
       slider = document.createElement("input");
       slider.type = "range";
