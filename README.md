@@ -45,7 +45,7 @@ For the best results, give them a wide map with flat ground, some trees, stone u
 - Every building comes from a blueprint with **random variation**: width, height, roof shape, windows, chimneys and flower boxes. No two houses look the same.
 - Interiors have shaded back walls (they sit in shadow) and furniture drawn slightly brighter so it stands out. Villagers walk through any pixel inside a house.
 - Building types: houses, farms, wells, workshops, markets, granaries, halls, training yards with dummies, towers, walls, palisades, gates and moats. Decorations include lamps, banners, fences, benches, gardens and statues.
-- **Expansion.** When a town is full, pioneers found new settlements (outposts). Each faction supports up to **500 members** across any number of settlements. A large map is needed to reach that.
+- **Expansion.** When a town is full, pioneers found new settlements (outposts). Each faction supports up to **500 members** across any number of settlements. A large map is needed to reach that: the default canvas fits two small towns (roughly 15–25 villagers in total). For big civilisations, choose a large canvas size and enable **Settings → Limitless** (Sandboxels caps the pixel count at about 13,800 by default, and houses, fields and people all count).
 
 ### Trade & events
 - Markets set prices from supply and demand. Merchants carry goods and coin between settlements, and buy food when stores run low.
@@ -101,6 +101,8 @@ SANDBOXELS_SRC=... node t_ui.js      # UI layer
 SANDBOXELS_SRC=... node t_events.js  # trade & events
 SANDBOXELS_SRC=... node t_perf.js    # performance
 SANDBOXELS_SRC=... node t20.js       # stuck detector
+SANDBOXELS_SRC=... node t_ladder.js  # quarry ladders / climbing
+SANDBOXELS_SRC=... node t_big.js 30000 450   # growth & expansion on a large map
 ```
 
 These harnesses run the real Sandboxels engine headlessly in jsdom.

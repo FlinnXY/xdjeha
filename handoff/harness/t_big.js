@@ -4,7 +4,7 @@ const {setup,terrain}=require('./sim');
 (async()=>{
  const r=await setup(); const w=r.w;
  const W=+process.argv[3]||450;
- w.width=W-1; w.height=99; w.clearAll();
+ w.width=W-1; w.height=99; w.eval('maxPixelCount = (width+1)*(height+1)'); w.clearAll();
  const trees=[]; for(let x=8;x<W-8;x+=13+(x%7)) trees.push(x);
  const mid=Math.round(W/2);
  terrain(r,{lake:[mid-10,mid+10],trees});
