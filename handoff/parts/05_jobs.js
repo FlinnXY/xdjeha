@@ -205,11 +205,25 @@ function planQuarry(c) {
       const top = columnGround(x) + 1; if (top < 1) continue;
       for (let y = top; y <= bottom; y++) cells.push([x, y]);
     }
-    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0 };
+    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0, L: L };
     return c.quarry;
   }
   return null;
 }
+// a finished (or abandoned) pit gets a ladder against its deep wall so nobody is ever trapped down there
+function ladderQuarry(Q) {
+  if (!Q || Q.ladder || !Q.L) return;
+  Q.ladder = true;
+  let xe = -1;
+  for (let j = Q.L; j >= 0; j--) { const x = Q.x0 + Q.dir * j; if (Q.cells.some((cc, k) => k < Q.i && cc[0] === x)) { xe = x; break; } }
+  if (xe < 0) return;
+  const xw = xe + Q.dir, gw = columnGround(xw); if (gw < 1) return;
+  let yb = gw; while (yb < height - 1 && !pixelMap[xe][yb + 1]) yb++;
+  if (yb - gw < 3) return;
+  for (let y = gw; y <= yb; y++) if (!pixelMap[xe][y]) { createPixel("hz_ladder", xe, y); const o = pixelMap[xe][y]; if (o) o.hzb2 = 1; }
+  H2.hasLadders = true;
+}
+H2.ladderQuarry = ladderQuarry;
 TASKS.mine = function (p, t) {
   if (carrying(p) >= CARRY_MAX) return "done";
   const c = colById(p.col); if (!c) return "done";
@@ -231,7 +245,7 @@ TASKS.mine = function (p, t) {
   }
   // 2. the quarry
   let Q = c.quarry;
-  if (!Q || Q.i >= Q.cells.length) { Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
+  if (!Q || Q.i >= Q.cells.length) { ladderQuarry(Q); Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
   let cell = Q.cells[Q.i];
   // skip cells that are already empty or must not be dug (water next to it would flood the pit)
   let guard = 0;
@@ -248,7 +262,7 @@ TASKS.mine = function (p, t) {
   if (!cell) return "done";
   // stall guard: a cell nobody can reach is skipped; a pit that keeps stalling is abandoned for a fresh one
   if (Q.lastI !== Q.i) { Q.lastI = Q.i; Q.stall = 0; }
-  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { c.quarry = null; return "done"; } return; }
+  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { ladderQuarry(Q); c.quarry = null; return "done"; } return; }
   const reach = Math.abs(p.x - cell[0]) <= 2 && Math.abs(p.y - cell[1]) <= 2 && p.y <= cell[1] + 1;
   const r = reach ? "arrive" : goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
   if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }

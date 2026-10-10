@@ -121,6 +121,8 @@ def("hz_spray", { color: ["#a8dcff","#d6f0ff","#7cc4f5"], behavior: behaviors.WA
 // walk-through pieces: people pass through them like an open archway (they swing aside for a moment, like doors)
 def("hz_stair", { color: ["#8a6440","#7e5a38"], behavior: behaviors.WALL, density: 600, hardness: 0.25, bhp: 14, hzb: true, pass: true, stair: true, forceSaveColor: true,
   burn: 20, burnTime: 220, burnInto: "ash", tempHigh: 450, stateHigh: "ash", desc: "Staircase to an upper floor." });
+def("hz_ladder", { color: ["#8b6a3e","#7a5c34","#9a7848"], behavior: behaviors.WALL, density: 600, hardness: 0.2, bhp: 10, hzb: true, pass: true, ladder: true, forceSaveColor: true,
+  burn: 25, burnTime: 200, burnInto: "ash", tempHigh: 450, stateHigh: "ash", desc: "Ladder: villagers climb up and down it (miners put them in quarries)." });
 def("hz_lamppost", { color: ["#2b2b30","#33333a"], behavior: behaviors.WALL, density: 3000, hardness: 0.5, bhp: 16, hzb: true, pass: true, forceSaveColor: true, desc: "Street lamp post." });
 def("hz_flower", { color: ["#e0457b","#f4d03f","#ffffff","#b05cc8"], behavior: behaviors.WALL, density: 200, hardness: 0.01, bhp: 1, hzb: true, pass: true, forceSaveColor: true,
   burn: 60, burnTime: 40, burnInto: "ash", tempHigh: 200, stateHigh: "ash", desc: "Garden flowers planted by villagers." });

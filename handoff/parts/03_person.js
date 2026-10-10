@@ -182,7 +182,7 @@ function shift(p, dx, dy, soft) {    // move the whole person (body + head) by d
 }
 H2.shift = shift;
 function dropOk(x, y) { // is there something to stand on within 3 cells below (x,y)?
-  for (let k = 1; k <= 4; k++) {
+  for (let k = 1; k <= 6; k++) {
     if (!inb(x, y + k)) return true;
     const o = pixelMap[x][y + k];
     if (o) { const kd = kindOf(o); return kd !== 4; }
@@ -262,8 +262,18 @@ function pfPass(x, y, p) {
   if (k === 3) { const e = elements[o.element]; if (e && (e.pass || e.stair)) return true; return o.element === "hz_gate" ? (o.fac === undefined || o.fac === p.fac) : (o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || !!H2.truce); }
   return false;
 }
+// a ladder cell (also while it is swung aside for a climber passing through)
+function isLadder(x, y) {
+  if (!inb(x, y)) return false;
+  const o = pixelMap[x][y]; if (o) { const e = elements[o.element]; if (e && e.ladder) { H2.hasLadders = true; return true; } if (!isPerson(o)) return false; }
+  if (!H2.hasLadders) return false;
+  const d = H2.doors; for (let i = 0; i < d.length; i++) if (d[i].x === x && d[i].y === y && d[i].el === "hz_ladder") return true;
+  return false;
+}
+H2.isLadder = isLadder;
 function pfSupport(x, y) {
   if (y + 1 > height) return true;
+  if (isLadder(x, y + 1)) return true;
   const o = pixelMap[x][y + 1];
   if (!o || isPerson(o)) return false;
   const e = elements[o.element];
@@ -295,7 +305,13 @@ function findPath(p, tx, ty, range, vy) {
       // step down diagonally (head passes where the body was level)
       if (pfPass(nx, cy, p) && stand(nx, cy + 1) && !(stand(nx, cy))) tryN(cy + 1);
       // drop down
-      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 4; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 6; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+    }
+    // ladders: climb straight up or down
+    for (const dy of [-1, 1]) {
+      const ny = cy + dy; if (ny < 1 || ny >= height || !isLadder(cx, ny)) continue;
+      if (dy < 0 && !(ch ? pfPass(cx, ny, p) : pfPass(cx, ny - 1, p))) continue;
+      const k = idx(cx, ny); if (prev[k] !== -2 || qt >= q.length) continue; prev[k] = cur; q[qt++] = k;
     }
   }
   if (goal < 0) return null;
@@ -312,7 +328,8 @@ function pathDir(p, tx, ty, range, vy) {
   if (P && P.pts) {
     // where are we on the path? (look a few nodes ahead, people get swapped around a bit)
     let i = -1;
-    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
+    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && n.y === p.y) { i = k; break; } }
+    if (i < 0) for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
     if (i >= 0) { P.i = i; const nx = P.pts[i + 1]; return nx ? (Math.sign(nx.x - p.x) || p.dir || 1) : 0; }
     P = p.path = null;     // knocked off the path: plan again
   }
@@ -335,6 +352,13 @@ function goTo(p, tx, ty, range, vy) {
   const via = pd === null ? stairRoute(p, tx, ty) : null;
   p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
   if (pd !== null && p.path && p.path.pts) { const nx = p.path.pts[p.path.i + 1]; if (nx && nx.y < p.y) p.tgy = nx.y - 2; else if (nx) p.tgy = p.y; }   // stairs are steps only when the path climbs
+  if (pd !== null && p.path && p.path.pts) {
+    const nx = p.path.pts[p.path.i + 1];
+    if (nx && nx.x === p.x && nx.y !== p.y && isLadder(p.x, nx.y)) {     // on a ladder: climb
+      if (shift(p, 0, Math.sign(nx.y - p.y))) { p.stk = 0; p.fl = 0; p.path.i++; return "moving"; }
+      p.stk = (p.stk || 0) + 1; return "blocked";
+    }
+  }
   if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
   let dir = pd ? pd : Math.sign(dxT);
@@ -342,7 +366,7 @@ function goTo(p, tx, ty, range, vy) {
   else if (dir === 0) dir = p.dir || 1;
   p.wantDir = dir; p.wantT = pixelTicks;
   if (p.gx === p.x && p.gy === p.y) { p.gs = (p.gs || 0) + 1; if (p.gs > 22) { p.gs = 0; p.dd = rnd() < 0.5 ? -1 : 1; p.detour = rint(6, 14); p.fails = (p.fails || 0) + 1; } } else { p.gs = 0; p.gx = p.x; p.gy = p.y; }
-  const moved = tryWalk(p, dir, false);
+  const moved = tryWalk(p, dir, pd === null && (p.fails || 0) > 6);      // long stuck with no path: risk a deeper drop
   if (moved) { p.stk = Math.max(0, (p.stk || 0) - 1); }
   else {
     p.stk = (p.stk || 0) + 1;
@@ -461,7 +485,9 @@ function physics(p) {
   if (!inb(x, y + 1)) { p.fl = 0; return; }
   const below = pixelMap[x][y + 1];
   const kb = below ? kindOf(below) : 0;
-  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
+  const onL = isLadder(x, y + 1) || isLadder(x, y);
+  if (onL) { p.fl = 0; }
+  else if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
     if (shift(p, 0, 1)) { if (kb === 0) p.fl = (p.fl || 0) + 1; return; }
   }
   if (kb >= 2) {

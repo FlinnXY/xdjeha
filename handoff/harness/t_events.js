@@ -38,8 +38,7 @@ const { setup, terrain } = require('./sim');
   const clearCorridor = () => {
     const x0 = Math.max(1, Math.min(A.x, B.x) - 4), x1 = Math.min(w.width - 1, Math.max(A.x, B.x) + 4);
     for (let x = x0; x <= x1; x++) {
-      const gy = groundAt(x);
-      for (let y = Math.max(2, gy - 9); y <= gy; y++) {
+      for (let y = 2; y < w.height; y++) {
         const px = w.pixelMap[x] && w.pixelMap[x][y];
         if (px && ['wood', 'plant', 'leaf', 'tree_branch', 'seed'].includes(px.element)) w.deletePixel(x, y);
       }
@@ -114,20 +113,11 @@ const { setup, terrain } = require('./sim');
   log('trigger bandits:', okB, 'maxBanditsSeen:', maxBandits, 'banditsNow:', nomads('bandit').length,
       'retreatSeen:', retreatSeen, 'heroes(FoughtOffBandits):', heroes.length);
 
-  // ===================== PLAGUE =========================================
-  log('\n=== PLAGUE ===');
-  calm();
-  const sickBefore = H2.people.filter(p => p.sick).length;
-  const okP = H2.events.trigger('plague', tgt.x);
-  r.run(60);
-  const sickAfter = H2.people.filter(p => p.sick && p.sick.k === 'plague').length;
-  log('trigger plague:', okP, 'plague-sick before/after:', sickBefore, '->', sickAfter);
-
   // ===================== GOD-EVENT SPAWNER ELEMENTS =====================
   log('\n=== GOD-EVENT ELEMENTS ===');
+  calm();
   const placeAt = (el, x) => {
-    const gy = groundAt(x);
-    const yy = Math.max(2, gy - 1);
+    const yy = 4;                                    // empty sky cell: guarantees onPlace runs
     const before = H2.events.last.length;
     r.put(el, x, yy);
     const cleared = !w.pixelMap[x][yy] || w.pixelMap[x][yy].element !== el;
@@ -139,11 +129,21 @@ const { setup, terrain } = require('./sim');
                          ['hz_event_bandits', (t2[1] || t2[0]).x], ['hz_event_plague', t2[0].x]]) {
     const res = placeAt(el, x);
     log(el, '-> pixelCleared:', res.pixelCleared, 'eventLogged:', res.eventLogged);
-    r.run(400); calm();
+    r.run(500); calm();
   }
   }
-  r.run(2500);   // let the element-spawned events resolve
+  r.run(2000);   // let the element-spawned events resolve
   calm();
+
+  // ===================== PLAGUE (last: it is destructive) ===============
+  log('\n=== PLAGUE ===');
+  calm();
+  const sickBefore = H2.people.filter(p => p.sick).length;
+  const tgtP = (towns().sort((a, b) => b.pop - a.pop)[0]) || A;
+  const okP = H2.events.trigger('plague', tgtP.x);
+  r.run(60);
+  const sickAfter = H2.people.filter(p => p.sick && p.sick.k === 'plague').length;
+  log('trigger plague:', okP, 'plague-sick before/after:', sickBefore, '->', sickAfter);
 
   // ===================== WRAP UP ========================================
   log('\n=== CHRONICLE TAIL ===');

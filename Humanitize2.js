@@ -277,6 +277,8 @@ def("hz_spray", { color: ["#a8dcff","#d6f0ff","#7cc4f5"], behavior: behaviors.WA
 // walk-through pieces: people pass through them like an open archway (they swing aside for a moment, like doors)
 def("hz_stair", { color: ["#8a6440","#7e5a38"], behavior: behaviors.WALL, density: 600, hardness: 0.25, bhp: 14, hzb: true, pass: true, stair: true, forceSaveColor: true,
   burn: 20, burnTime: 220, burnInto: "ash", tempHigh: 450, stateHigh: "ash", desc: "Staircase to an upper floor." });
+def("hz_ladder", { color: ["#8b6a3e","#7a5c34","#9a7848"], behavior: behaviors.WALL, density: 600, hardness: 0.2, bhp: 10, hzb: true, pass: true, ladder: true, forceSaveColor: true,
+  burn: 25, burnTime: 200, burnInto: "ash", tempHigh: 450, stateHigh: "ash", desc: "Ladder: villagers climb up and down it (miners put them in quarries)." });
 def("hz_lamppost", { color: ["#2b2b30","#33333a"], behavior: behaviors.WALL, density: 3000, hardness: 0.5, bhp: 16, hzb: true, pass: true, forceSaveColor: true, desc: "Street lamp post." });
 def("hz_flower", { color: ["#e0457b","#f4d03f","#ffffff","#b05cc8"], behavior: behaviors.WALL, density: 200, hardness: 0.01, bhp: 1, hzb: true, pass: true, forceSaveColor: true,
   burn: 60, burnTime: 40, burnInto: "ash", tempHigh: 200, stateHigh: "ash", desc: "Garden flowers planted by villagers." });
@@ -527,7 +529,7 @@ function shift(p, dx, dy, soft) {    // move the whole person (body + head) by d
 }
 H2.shift = shift;
 function dropOk(x, y) { // is there something to stand on within 3 cells below (x,y)?
-  for (let k = 1; k <= 4; k++) {
+  for (let k = 1; k <= 6; k++) {
     if (!inb(x, y + k)) return true;
     const o = pixelMap[x][y + k];
     if (o) { const kd = kindOf(o); return kd !== 4; }
@@ -607,8 +609,18 @@ function pfPass(x, y, p) {
   if (k === 3) { const e = elements[o.element]; if (e && (e.pass || e.stair)) return true; return o.element === "hz_gate" ? (o.fac === undefined || o.fac === p.fac) : (o.fac === undefined || o.fac === p.fac || p.job === "merchant" || p.nomad === "trader" || !!H2.truce); }
   return false;
 }
+// a ladder cell (also while it is swung aside for a climber passing through)
+function isLadder(x, y) {
+  if (!inb(x, y)) return false;
+  const o = pixelMap[x][y]; if (o) { const e = elements[o.element]; if (e && e.ladder) { H2.hasLadders = true; return true; } if (!isPerson(o)) return false; }
+  if (!H2.hasLadders) return false;
+  const d = H2.doors; for (let i = 0; i < d.length; i++) if (d[i].x === x && d[i].y === y && d[i].el === "hz_ladder") return true;
+  return false;
+}
+H2.isLadder = isLadder;
 function pfSupport(x, y) {
   if (y + 1 > height) return true;
+  if (isLadder(x, y + 1)) return true;
   const o = pixelMap[x][y + 1];
   if (!o || isPerson(o)) return false;
   const e = elements[o.element];
@@ -640,7 +652,13 @@ function findPath(p, tx, ty, range, vy) {
       // step down diagonally (head passes where the body was level)
       if (pfPass(nx, cy, p) && stand(nx, cy + 1) && !(stand(nx, cy))) tryN(cy + 1);
       // drop down
-      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 4; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+      if (pfPass(nx, cy, p) && (ch || pfPass(nx, cy - 1, p))) for (let k = 1; k <= 6; k++) { if (!pfPass(nx, cy + k, p)) break; if (stand(nx, cy + k)) { tryN(cy + k); break; } }
+    }
+    // ladders: climb straight up or down
+    for (const dy of [-1, 1]) {
+      const ny = cy + dy; if (ny < 1 || ny >= height || !isLadder(cx, ny)) continue;
+      if (dy < 0 && !(ch ? pfPass(cx, ny, p) : pfPass(cx, ny - 1, p))) continue;
+      const k = idx(cx, ny); if (prev[k] !== -2 || qt >= q.length) continue; prev[k] = cur; q[qt++] = k;
     }
   }
   if (goal < 0) return null;
@@ -657,7 +675,8 @@ function pathDir(p, tx, ty, range, vy) {
   if (P && P.pts) {
     // where are we on the path? (look a few nodes ahead, people get swapped around a bit)
     let i = -1;
-    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
+    for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && n.y === p.y) { i = k; break; } }
+    if (i < 0) for (let k = P.i; k < Math.min(P.pts.length, P.i + 6); k++) { const n = P.pts[k]; if (n.x === p.x && Math.abs(n.y - p.y) <= 1) { i = k; break; } }
     if (i >= 0) { P.i = i; const nx = P.pts[i + 1]; return nx ? (Math.sign(nx.x - p.x) || p.dir || 1) : 0; }
     P = p.path = null;     // knocked off the path: plan again
   }
@@ -680,6 +699,13 @@ function goTo(p, tx, ty, range, vy) {
   const via = pd === null ? stairRoute(p, tx, ty) : null;
   p.tgy = via ? p.y : ty; p.tgT = pixelTicks;
   if (pd !== null && p.path && p.path.pts) { const nx = p.path.pts[p.path.i + 1]; if (nx && nx.y < p.y) p.tgy = nx.y - 2; else if (nx) p.tgy = p.y; }   // stairs are steps only when the path climbs
+  if (pd !== null && p.path && p.path.pts) {
+    const nx = p.path.pts[p.path.i + 1];
+    if (nx && nx.x === p.x && nx.y !== p.y && isLadder(p.x, nx.y)) {     // on a ladder: climb
+      if (shift(p, 0, Math.sign(nx.y - p.y))) { p.stk = 0; p.fl = 0; p.path.i++; return "moving"; }
+      p.stk = (p.stk || 0) + 1; return "blocked";
+    }
+  }
   if (via) { tx = via.x; ty = p.y; }
   const dxT = tx - p.x;
   let dir = pd ? pd : Math.sign(dxT);
@@ -687,7 +713,7 @@ function goTo(p, tx, ty, range, vy) {
   else if (dir === 0) dir = p.dir || 1;
   p.wantDir = dir; p.wantT = pixelTicks;
   if (p.gx === p.x && p.gy === p.y) { p.gs = (p.gs || 0) + 1; if (p.gs > 22) { p.gs = 0; p.dd = rnd() < 0.5 ? -1 : 1; p.detour = rint(6, 14); p.fails = (p.fails || 0) + 1; } } else { p.gs = 0; p.gx = p.x; p.gy = p.y; }
-  const moved = tryWalk(p, dir, false);
+  const moved = tryWalk(p, dir, pd === null && (p.fails || 0) > 6);      // long stuck with no path: risk a deeper drop
   if (moved) { p.stk = Math.max(0, (p.stk || 0) - 1); }
   else {
     p.stk = (p.stk || 0) + 1;
@@ -806,7 +832,9 @@ function physics(p) {
   if (!inb(x, y + 1)) { p.fl = 0; return; }
   const below = pixelMap[x][y + 1];
   const kb = below ? kindOf(below) : 0;
-  if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
+  const onL = isLadder(x, y + 1) || isLadder(x, y);
+  if (onL) { p.fl = 0; }
+  else if (kb === 0 || (kb === 1 && pixelTicks % 3 === 0 && !p.swim) || (kb === 3 && elements[below.element].pass && !elements[below.element].stair)) {
     if (shift(p, 0, 1)) { if (kb === 0) p.fl = (p.fl || 0) + 1; return; }
   }
   if (kb >= 2) {
@@ -1715,11 +1743,25 @@ function planQuarry(c) {
       const top = columnGround(x) + 1; if (top < 1) continue;
       for (let y = top; y <= bottom; y++) cells.push([x, y]);
     }
-    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0 };
+    c.quarry = { x0: x0, dir: dir, cells: cells, i: 0, L: L };
     return c.quarry;
   }
   return null;
 }
+// a finished (or abandoned) pit gets a ladder against its deep wall so nobody is ever trapped down there
+function ladderQuarry(Q) {
+  if (!Q || Q.ladder || !Q.L) return;
+  Q.ladder = true;
+  let xe = -1;
+  for (let j = Q.L; j >= 0; j--) { const x = Q.x0 + Q.dir * j; if (Q.cells.some((cc, k) => k < Q.i && cc[0] === x)) { xe = x; break; } }
+  if (xe < 0) return;
+  const xw = xe + Q.dir, gw = columnGround(xw); if (gw < 1) return;
+  let yb = gw; while (yb < height - 1 && !pixelMap[xe][yb + 1]) yb++;
+  if (yb - gw < 3) return;
+  for (let y = gw; y <= yb; y++) if (!pixelMap[xe][y]) { createPixel("hz_ladder", xe, y); const o = pixelMap[xe][y]; if (o) o.hzb2 = 1; }
+  H2.hasLadders = true;
+}
+H2.ladderQuarry = ladderQuarry;
 TASKS.mine = function (p, t) {
   if (carrying(p) >= CARRY_MAX) return "done";
   const c = colById(p.col); if (!c) return "done";
@@ -1741,7 +1783,7 @@ TASKS.mine = function (p, t) {
   }
   // 2. the quarry
   let Q = c.quarry;
-  if (!Q || Q.i >= Q.cells.length) { Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
+  if (!Q || Q.i >= Q.cells.length) { ladderQuarry(Q); Q = planQuarry(c); if (!Q) { t.none = (t.none || 0) + 1; if (t.none > 6) { H2.noRocks = pixelTicks; return "fail"; } return TASKS.wander(p, t); } }
   let cell = Q.cells[Q.i];
   // skip cells that are already empty or must not be dug (water next to it would flood the pit)
   let guard = 0;
@@ -1758,7 +1800,7 @@ TASKS.mine = function (p, t) {
   if (!cell) return "done";
   // stall guard: a cell nobody can reach is skipped; a pit that keeps stalling is abandoned for a fresh one
   if (Q.lastI !== Q.i) { Q.lastI = Q.i; Q.stall = 0; }
-  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { c.quarry = null; return "done"; } return; }
+  if (++Q.stall > 260) { Q.i++; Q.stall = 0; Q.skips = (Q.skips || 0) + 1; if (Q.skips > 4) { ladderQuarry(Q); c.quarry = null; return "done"; } return; }
   const reach = Math.abs(p.x - cell[0]) <= 2 && Math.abs(p.y - cell[1]) <= 2 && p.y <= cell[1] + 1;
   const r = reach ? "arrive" : goTo(p, cell[0] - Q.dir, cell[1], 1, 3);
   if (r === "fail") { t.qf = (t.qf || 0) + 1; if (t.qf > 2) { Q.i++; t.qf = 0; } return; }
