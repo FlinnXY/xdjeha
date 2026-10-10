@@ -171,31 +171,31 @@ TASKS.trade = function (p, t) {
     if (!o) return "done";
     cv = p.caravan = { active: true, to: o.id, from: c.id, t0: pixelTicks, phase: 0, sold: 0, bought: 0, coin: 0, carried: {}, startCoin: p.coin };
   }
-  if (pixelTicks - cv.t0 > DAY && cv.phase < 3) cv.phase = 3;     // overall timeout: head home
+  if (pixelTicks - cv.t0 > DAY * 3 && cv.phase < 3) cv.phase = 3;     // overall timeout: head home
   let o = colById(cv.to);
   if ((!o || (o.pop || 0) <= 0) && cv.phase < 3) { cv.phase = 3; o = null; }
 
-  if (cv.phase === 0) {                                           // load at home
+  if (cv.phase === 0) {                                           // gather goods at home
     const spot = tradeSpot(c);
-    const r = goTo(p, spot.x, spot.y, 3, 5);
-    if (r === "fail") { loadCaravan(p, c, o); cv.phase = 1; return; }
-    if (r !== "arrive") return;
-    loadCaravan(p, c, o); cv.phase = 1; return;
+    const r = goTo(p, spot.x, spot.y, 4, 8);
+    if (r === "arrive" || r === "fail" || pixelTicks - cv.t0 > 150) { loadCaravan(p, c, o); cv.phase = 1; cv.t1 = pixelTicks; }
+    return;
   }
   if (cv.phase === 1) {                                           // travel to the partner
     if (!o) { cv.phase = 3; return; }
     const spot = tradeSpot(o);
-    const r = goTo(p, spot.x, spot.y, 3, 6);
-    if (r === "fail") { cv.f = (cv.f || 0) + 1; if (cv.f > 12) cv.phase = 3; return; }
+    const r = goTo(p, spot.x, spot.y, 4, 8);
     if (r === "arrive") cv.phase = 2;
+    else if (r === "fail") { cv.f = (cv.f || 0) + 1; if (cv.f > 30) cv.phase = 3; }
+    else if (pixelTicks - cv.t1 > DAY * 2) cv.phase = 3;        // could not get there in time
     return;
   }
-  if (cv.phase === 2) { doTrade(p, c, o, cv); cv.phase = 3; return; }
+  if (cv.phase === 2) { doTrade(p, c, o, cv); cv.phase = 3; cv.t3 = pixelTicks; return; }
 
   // phase 3: return home and deposit
   const hx = c.hall ? c.hall.x : c.x, hy = c.hall ? c.hall.y : c.y;
-  const r = goTo(p, hx, hy, 3, 6);
-  if (r === "arrive" || r === "fail" || pixelTicks - cv.t0 > DAY * 1.6) {
+  const r = goTo(p, hx, hy, 4, 8);
+  if (r === "arrive" || r === "fail" || pixelTicks - (cv.t3 || cv.t0) > DAY * 2) {
     depositCaravan(p, c, cv);
     finishCaravan(p);
     return "done";

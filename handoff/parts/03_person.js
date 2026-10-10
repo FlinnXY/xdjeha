@@ -630,6 +630,7 @@ function think(p) {
   if (p.bt < 35.6) { if (setTask(p, "warm", { until: pixelTicks + 400 }, 60)) return; }
   if (p.bt > 38.6) { if (setTask(p, "cool", { until: pixelTicks + 300 }, 60)) return; }
   // 5. thirst, hunger
+  if (p.th < 35 && p.flask > 0) { p.flask--; p.th = Math.min(100, p.th + 45); }      // a sip from the waterskin saves a trip
   if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : 55)) return; }
   if (p.hu < 32) { if (setTask(p, "eat", {}, p.hu < 10 ? 70 : 50)) return; }
   // 6. sleep
@@ -714,7 +715,7 @@ TASKS.drink = function (p, t) {
   if (r === "arrive") {
     t.n = (t.n || 0) + 1;
     if (t.n % 3 === 0) { p.th = Math.min(100, p.th + 18); if (!t.src.well && rnd() < 0.15 && t.src.px && !t.src.px.del) deletePixel(t.src.px.x, t.src.px.y); }
-    if (p.th >= 95) return "done";
+    if (p.th >= 95) { p.flask = isChildPx(p) ? 1 : 2; return "done"; }   // refill the waterskin
   }
 };
 TASKS.goto_drink = function (p, t) { // run to water (e.g. when on fire)

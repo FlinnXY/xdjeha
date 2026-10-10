@@ -5,7 +5,7 @@ const { setup, terrain } = require('./sim');
 (async () => {
   const r = await setup();
   const w = r.w, H2 = w.H2;
-  terrain(r);
+  terrain(r, { trees: [] });   // keep the lake (drinking water); no trees blocking the travel corridor
   w.paused = false; w.manualPaused = false;
 
   const log = (...a) => console.log(...a);
@@ -15,6 +15,7 @@ const { setup, terrain } = require('./sim');
   const nomads = (k) => H2.people.filter(p => p.nomad === k && !p.dead && !p.del);
 
   // ---- establish two villages -------------------------------------------
+  H2.cfg.events = false;            // no random world events while the villages establish
   r.put('hz_azure_party', 20, 40);
   r.put('hz_crimson_party', 135, 40);
   log('booting villages...');
@@ -25,35 +26,32 @@ const { setup, terrain } = require('./sim');
 
   const A = ts[0], B = ts[1] || ts[0];
 
-  // keep the two factions at peace so the event scenarios are not disrupted by
-  // a full-scale war wiping out a town mid-test
+  // keep peace + hold the auto-scheduler quiet so each event is exercised on its own
   const makePeace = () => { H2.war.on = false; for (const c of H2.cols) { c.tensionPts = 0; c.tension = 0; if (c.war) c.war.state = 'peace'; } };
-  H2.cfg.war = false; makePeace();
+  const calm = () => { makePeace(); const T = w.pixelTicks; const tm = H2.events.timers; tm.festival = T; tm.trader = T; tm.bandits = T; tm.plague = T; };
+  H2.cfg.war = false; H2.cfg.verbose = false; H2.cfg.events = true; calm();
 
   // ===================== TRADE ==========================================
   log('\n=== TRADE ===');
-  makePeace();
+  calm();
   // create a strong surplus/shortage so a caravan is worthwhile
   A.stock.wood = 260; A.stock.stone = 180; A.stock.coin = 300;
   B.stock.wood = 0; B.stock.stone = 2; B.stock.coin = 300; B.stock.bread = 80; B.stock.grain = 60;
   A.stock.bread = 4; A.stock.grain = 2;                       // A is short of food -> should buy
-  // give A a market so the merchant job sticks, and make an adult a merchant
-  const gyA = groundAt(A.hall ? A.hall.x : A.x);
-  r.put('hz_stall', (A.hall ? A.hall.x : A.x) + 2, Math.max(2, gyA - 1));
-  r.run(120);                                                 // let census register the market
+  // give both towns a market so a merchant job sticks and has somewhere to trade
+  const addMarket = (c) => { const bx = (c.hall ? c.hall.x : c.x) + 2; r.put('hz_stall', bx, Math.max(2, groundAt(c.hall ? c.hall.x : c.x) - 1)); };
+  addMarket(A); addMarket(B);
+  r.run(150);                                                 // let census register the markets
   const pickMerchant = () => H2.people.find(p => p.col === A.id && !p.dead && !p.nomad && w.H2.stageOf(p) === 'adult');
   let mm = pickMerchant(); if (mm) H2.setJob(mm, 'merchant');
   if (mm) log('shouldTrade(merchant,' + A.name + ') =', H2.shouldTrade(mm, A));
   const routes0 = H2.trade.routes.length;
-  // drive the caravan: re-assert the merchant + trade task until a route completes
-  for (let i = 0; i < 70 && H2.trade.routes.length === routes0; i++) {
-    makePeace();
+  // let jobThink drive the merchant naturally (it re-issues the caravan each day after sleep)
+  for (let i = 0; i < 90 && H2.trade.routes.length === routes0; i++) {
+    calm();
     let p = pickMerchant();
-    if (p) {
-      if (p.job !== 'merchant') H2.setJob(p, 'merchant');
-      if (!p.task || p.task.k !== 'trade') { p._tpid = B.id; if (H2.shouldTrade(p, A)) H2.setTask(p, "trade", {}, 55); }
-    }
-    r.run(100);
+    if (p && p.job !== 'merchant') H2.setJob(p, 'merchant');
+    r.run(120);
   }
   log('trade.stats:', JSON.stringify(H2.trade.stats));
   log('trade.routes (+' + (H2.trade.routes.length - routes0) + '):', H2.trade.routes.slice(-4).map(x => x.from + '->' + x.to + ' s' + x.sold + ' b' + x.bought + ' coin' + x.coin).join(' | '));
@@ -62,7 +60,7 @@ const { setup, terrain } = require('./sim');
 
   // ===================== FESTIVAL =======================================
   log('\n=== FESTIVAL ===');
-  makePeace();
+  calm();
   const moodBefore = Math.round(A.avgMood || 0);
   const okF = H2.events.trigger('festival', A.x);
   log('trigger festival:', okF, 'A.festival set:', A.festival > w.pixelTicks);
@@ -75,16 +73,16 @@ const { setup, terrain } = require('./sim');
 
   // ===================== WANDERING TRADER ===============================
   log('\n=== WANDERING TRADER ===');
-  makePeace();
+  calm();
   const okT = H2.events.trigger('trader');
   let maxTraders = 0;
-  for (let i = 0; i < 20; i++) { r.run(300); makePeace(); maxTraders = Math.max(maxTraders, nomads('trader').length); }
+  for (let i = 0; i < 20; i++) { r.run(300); calm(); maxTraders = Math.max(maxTraders, nomads('trader').length); }
   log('trigger trader:', okT, 'maxTradersSeen:', maxTraders, 'tradersNow:', nomads('trader').length,
       'traderEvents:', H2.events.last.filter(e => e.name === 'trader').length);
 
   // ===================== BANDIT RAID ====================================
   log('\n=== BANDIT RAID ===');
-  makePeace();
+  calm();
   const tgt = (towns().sort((a, b) => b.pop - a.pop)[0]) || A;
   const defenders = () => H2.people.filter(p => p.col === tgt.id && !p.dead && !p.nomad && w.H2.stageOf(p) === 'adult').slice(0, 5);
   const armDefenders = () => { for (const p of defenders()) { if (p.job !== 'soldier') H2.setJob(p, 'soldier'); p.wpn = 'sword'; p.sk.fight = 6; } };
@@ -93,7 +91,7 @@ const { setup, terrain } = require('./sim');
   const okB = H2.events.trigger('bandits', tgt.x);
   let maxBandits = 0, retreatSeen = false;
   for (let i = 0; i < 30; i++) {
-    makePeace(); armDefenders();
+    calm(); armDefenders();
     r.run(200);
     maxBandits = Math.max(maxBandits, nomads('bandit').length);
     const raidIds = H2._raids ? Object.keys(H2._raids) : [];
@@ -106,7 +104,7 @@ const { setup, terrain } = require('./sim');
 
   // ===================== PLAGUE =========================================
   log('\n=== PLAGUE ===');
-  makePeace();
+  calm();
   const sickBefore = H2.people.filter(p => p.sick).length;
   const okP = H2.events.trigger('plague', tgt.x);
   r.run(60);
@@ -129,11 +127,11 @@ const { setup, terrain } = require('./sim');
                          ['hz_event_bandits', (t2[1] || t2[0]).x], ['hz_event_plague', t2[0].x]]) {
     const res = placeAt(el, x);
     log(el, '-> pixelCleared:', res.pixelCleared, 'eventLogged:', res.eventLogged);
-    r.run(400); makePeace();
+    r.run(400); calm();
   }
   }
   r.run(2500);   // let the element-spawned events resolve
-  makePeace();
+  calm();
 
   // ===================== WRAP UP ========================================
   log('\n=== CHRONICLE TAIL ===');

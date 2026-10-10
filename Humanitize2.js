@@ -975,6 +975,7 @@ function think(p) {
   if (p.bt < 35.6) { if (setTask(p, "warm", { until: pixelTicks + 400 }, 60)) return; }
   if (p.bt > 38.6) { if (setTask(p, "cool", { until: pixelTicks + 300 }, 60)) return; }
   // 5. thirst, hunger
+  if (p.th < 35 && p.flask > 0) { p.flask--; p.th = Math.min(100, p.th + 45); }      // a sip from the waterskin saves a trip
   if (p.th < 35) { if (setTask(p, "drink", { work: false }, p.th < 15 ? 72 : 55)) return; }
   if (p.hu < 32) { if (setTask(p, "eat", {}, p.hu < 10 ? 70 : 50)) return; }
   // 6. sleep
@@ -1059,7 +1060,7 @@ TASKS.drink = function (p, t) {
   if (r === "arrive") {
     t.n = (t.n || 0) + 1;
     if (t.n % 3 === 0) { p.th = Math.min(100, p.th + 18); if (!t.src.well && rnd() < 0.15 && t.src.px && !t.src.px.del) deletePixel(t.src.px.x, t.src.px.y); }
-    if (p.th >= 95) return "done";
+    if (p.th >= 95) { p.flask = isChildPx(p) ? 1 : 2; return "done"; }   // refill the waterskin
   }
 };
 TASKS.goto_drink = function (p, t) { // run to water (e.g. when on fire)
@@ -4043,31 +4044,31 @@ TASKS.trade = function (p, t) {
     if (!o) return "done";
     cv = p.caravan = { active: true, to: o.id, from: c.id, t0: pixelTicks, phase: 0, sold: 0, bought: 0, coin: 0, carried: {}, startCoin: p.coin };
   }
-  if (pixelTicks - cv.t0 > DAY && cv.phase < 3) cv.phase = 3;     // overall timeout: head home
+  if (pixelTicks - cv.t0 > DAY * 3 && cv.phase < 3) cv.phase = 3;     // overall timeout: head home
   let o = colById(cv.to);
   if ((!o || (o.pop || 0) <= 0) && cv.phase < 3) { cv.phase = 3; o = null; }
 
-  if (cv.phase === 0) {                                           // load at home
+  if (cv.phase === 0) {                                           // gather goods at home
     const spot = tradeSpot(c);
-    const r = goTo(p, spot.x, spot.y, 3, 5);
-    if (r === "fail") { loadCaravan(p, c, o); cv.phase = 1; return; }
-    if (r !== "arrive") return;
-    loadCaravan(p, c, o); cv.phase = 1; return;
+    const r = goTo(p, spot.x, spot.y, 4, 8);
+    if (r === "arrive" || r === "fail" || pixelTicks - cv.t0 > 150) { loadCaravan(p, c, o); cv.phase = 1; cv.t1 = pixelTicks; }
+    return;
   }
   if (cv.phase === 1) {                                           // travel to the partner
     if (!o) { cv.phase = 3; return; }
     const spot = tradeSpot(o);
-    const r = goTo(p, spot.x, spot.y, 3, 6);
-    if (r === "fail") { cv.f = (cv.f || 0) + 1; if (cv.f > 12) cv.phase = 3; return; }
+    const r = goTo(p, spot.x, spot.y, 4, 8);
     if (r === "arrive") cv.phase = 2;
+    else if (r === "fail") { cv.f = (cv.f || 0) + 1; if (cv.f > 30) cv.phase = 3; }
+    else if (pixelTicks - cv.t1 > DAY * 2) cv.phase = 3;        // could not get there in time
     return;
   }
-  if (cv.phase === 2) { doTrade(p, c, o, cv); cv.phase = 3; return; }
+  if (cv.phase === 2) { doTrade(p, c, o, cv); cv.phase = 3; cv.t3 = pixelTicks; return; }
 
   // phase 3: return home and deposit
   const hx = c.hall ? c.hall.x : c.x, hy = c.hall ? c.hall.y : c.y;
-  const r = goTo(p, hx, hy, 3, 6);
-  if (r === "arrive" || r === "fail" || pixelTicks - cv.t0 > DAY * 1.6) {
+  const r = goTo(p, hx, hy, 4, 8);
+  if (r === "arrive" || r === "fail" || pixelTicks - (cv.t3 || cv.t0) > DAY * 2) {
     depositCaravan(p, c, cv);
     finishCaravan(p);
     return "done";
@@ -4362,6 +4363,10 @@ function nomadMaintain() {
   const bandits = [];
   for (let i = 0; i < H2.people.length; i++) {
     const p = H2.people[i]; if (!p.nomad || p.dead || p.del) continue;
+    // a nomad must always live in its own hidden colony; if it leaked into a real
+    // colony (e.g. its band colony was cleaned up while it was mid-stride), remove it
+    const pc = colById(p.col);
+    if (!pc || !pc.nomad) { despawnPerson(p); continue; }
     // re-assert identity after the colony job system may have meddled
     if (p.nomad === "bandit") { p.title = "Bandit"; p.color = BANDIT_COLOR; if (!p.wpn) p.wpn = "sword"; bandits.push(p); if (p.job !== "laborer") p.job = "laborer"; }
     else if (p.nomad === "trader") { p.color = "#caa23a"; if (p.job !== "merchant") p.job = "merchant"; }

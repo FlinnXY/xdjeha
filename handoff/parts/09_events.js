@@ -287,6 +287,10 @@ function nomadMaintain() {
   const bandits = [];
   for (let i = 0; i < H2.people.length; i++) {
     const p = H2.people[i]; if (!p.nomad || p.dead || p.del) continue;
+    // a nomad must always live in its own hidden colony; if it leaked into a real
+    // colony (e.g. its band colony was cleaned up while it was mid-stride), remove it
+    const pc = colById(p.col);
+    if (!pc || !pc.nomad) { despawnPerson(p); continue; }
     // re-assert identity after the colony job system may have meddled
     if (p.nomad === "bandit") { p.title = "Bandit"; p.color = BANDIT_COLOR; if (!p.wpn) p.wpn = "sword"; bandits.push(p); if (p.job !== "laborer") p.job = "laborer"; }
     else if (p.nomad === "trader") { p.color = "#caa23a"; if (p.job !== "merchant") p.job = "merchant"; }
