@@ -7,9 +7,14 @@ const COST = {
   hz_stone: { stone: 1 }, hz_bed: { wood: 2 }, hz_cot: { wood: 2 }, hz_hearth: { stone: 2 }, hz_campfire: { wood: 2 }, hz_stall: { wood: 1 },
   hz_banner: { wood: 1 }, hz_anvil: { iron: 3 }, hz_forgefire: { stone: 2 }, hz_oven: { stone: 3 }, hz_rack: { wood: 2, iron: 1 }, hz_dummy: { wood: 2 },
   hz_post: { wood: 1 }, hz_medcross: { wood: 1 }, hz_scarecrow: { wood: 1 }, hz_mill: { wood: 3 }, hz_chest: { wood: 2 }, hz_cannon: { cannon: 1 }, hz_well: {},
-  glass: {}, dirt: {}, water: {},
+  glass: {}, dirt: {}, water: {}, hz_earth: {},
+  hz_plaster: { stone: 0.25 }, hz_beam: { wood: 0.5 }, hz_window: {}, hz_shutter: { wood: 0.25 }, hz_flowerbox: { wood: 0.25 }, hz_chimney: { stone: 1 },
+  hz_lantern: { wood: 0.25 }, hz_gold: { iron: 0.25 }, hz_statue: { stone: 1 }, hz_spray: {}, hz_stair: { wood: 1 }, hz_lamppost: { wood: 0.5 },
+  hz_flower: {}, hz_plinth: { stone: 0.5 }, hz_interior: {}, hz_backwin: {},
 };
-const GROUNDISH = { dirt: 1, grass: 1, soil: 1, mud: 1, sand: 1, rock: 1, gravel: 1, clay: 1, clay_soil: 1, snow: 1, packed_snow: 1, permafrost: 1, sandstone: 1, limestone: 1, basalt: 1, granite: 1, packed_sand: 1, farmland: 1 };
+const QUICK = { hz_interior: 1, hz_backwin: 1, hz_flower: 1, hz_spray: 1 };   // cheap finishing touches go up fast
+COST.hz_roof = { wood: 0.2 }; COST.hz_beam = { wood: 0.25 }; COST.hz_plank = { wood: 0.5 }; COST.hz_door = { wood: 0.5 }; COST.hz_stair = { wood: 0.5 }; COST.hz_plaster = { stone: 0.15 };
+const GROUNDISH = { hz_earth: 1, dirt: 1, grass: 1, soil: 1, mud: 1, sand: 1, rock: 1, gravel: 1, clay: 1, clay_soil: 1, snow: 1, packed_snow: 1, permafrost: 1, sandstone: 1, limestone: 1, basalt: 1, granite: 1, packed_sand: 1, farmland: 1 };
 function groundish(o) { if (!o || isPerson(o)) return false; const e = elements[o.element]; return !!(GROUNDISH[o.element] || (e && e.category === "land" && !e.hzb && e.state !== "liquid" && o.element !== "wood" && o.element !== "plant")); }
 
 /* tiny blueprint DSL ------------------------------------------------------- */
@@ -49,54 +54,105 @@ const BUILD_NAMES = { hut: "a hut", house: "a house", hall: "the town hall", wel
 const MAJOR_BUILD = { hall: 1, well: 1, market: 1, forge: 1, bakery: 1, hospital: 1, barracks: 1, tower: 1, wall: 1, moat: 1, palisade: 1, cannon: 1 };
 
 function costOfPlan(bp) { const c = {}; for (const cell of bp.cells) { const k = COST[cell[2]]; if (!k) continue; for (const g in k) c[g] = (c[g] || 0) + k[g]; } return c; }
-function affordable(c, cost, frac) { for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) return false; return true; }
+H2.costOfPlan = costOfPlan;
+function affordable(c, cost, frac) {
+  let swap = 0;
+  for (const g in cost) if ((c.stock[g] || 0) < cost[g] * frac) { if (g === "stone") swap = (cost[g] * frac - Math.max(0, c.stock.stone)) * STONE_SWAP; else return false; }
+  return !swap || c.stock.wood - WOOD_RESERVE >= swap + (cost.wood || 0) * frac;
+}
 
 /* ---- site finding ---------------------------------------------------------- */
+const CLEARABLE = { wood: 1, tree_branch: 1, plant: 1, hz_sapling: 1, sapling: 1, dead_plant: 1, vine: 1 };
 function columnGround(x) { // y of free cell above the topmost solid thing, only if that is real ground
   if (x < 1 || x >= width - 1) return -1;
-  for (let y = 0; y < height - 1; y++) { const o = pixelMap[x][y]; if (o) return groundish(o) ? y - 1 : -1; }
+  for (let y = 0; y < height - 1; y++) {
+    const o = pixelMap[x][y]; if (!o || isPerson(o) || o.dec || o.element === "hz_crop" || CLEARABLE[o.element]) continue;   // decor, crops and trees make way for buildings
+    if (isSoft(o) && (o.element !== "grass" || o.h > 0 || isSoft(pixelMap[x][y + 1]))) continue;  // grass blades / flowers are not ground
+    if (elements[o.element] && elements[o.element].state === "gas") continue;
+    if (elements[o.element] && elements[o.element].state === "liquid") {          // blood and shallow puddles are mopped up; lakes are not ground
+      let d = 1; while (d <= 2 && pixelMap[x][y + d] && elements[pixelMap[x][y + d].element].state === "liquid") d++;
+      if (d <= 2 && groundish(pixelMap[x][y + d])) continue;
+      return -1;
+    }
+    return groundish(o) ? y - 1 : -1;
+  }
   return -1;
 }
 function overlaps(c, x0, x1, margin) { for (const pl of c.plans) if (x1 + margin >= pl.x0 && x0 - margin <= pl.x1) return true; return false; }
+// a settlement only builds on ground that is closer to it than to any other settlement
+function ownTerritory(c, x) { const d = Math.abs(x - c.x); for (const o of H2.cols) if (o !== c && o.pop > 0 && Math.abs(x - o.x) < d) return false; return true; }
+H2.ownTerritory = ownTerritory;
 H2.reserved = function (c, x, y) { for (const pl of c.plans) if (x >= pl.x0 - 2 && x <= pl.x1 + 2) return true; return false; };
 function findSite(c, w, opt) {
   opt = opt || {};
   const cx = opt.cx !== undefined ? opt.cx : (c.hall ? c.hall.x : c.x);
-  const range = opt.range || 55;
+  const range = opt.range || Math.min(110, 55 + (c.pop || 0) * 2);
   const lo = c.wallL !== undefined && !opt.outside ? c.wallL + 3 : 2, hi = c.wallR !== undefined && !opt.outside ? c.wallR - 3 : width - 3;
   const order = [0];
   for (let o = 2; o <= range; o += 2) { if (opt.side === 1) order.push(o, -o); else if (opt.side === -1) order.push(-o, o); else order.push(o, -o); }
   for (const off of order) {
     const x0 = Math.round(cx + off - w / 2);
-    if (x0 < lo || x0 + w - 1 > hi) continue;
-    if (overlaps(c, x0, x0 + w - 1, 1)) continue;
+    const why = H2.dbgSite;
+    if (x0 < lo || x0 + w - 1 > hi) { if (why) why.push(off + ":range"); continue; }
+    if (overlaps(c, x0, x0 + w - 1, 1)) { if (why) why.push(off + ":plan"); continue; }
+    if (onPit(x0 - 3, x0 + w + 2)) { if (why) why.push(off + ":pit"); continue; }
+    if (!opt.anywhere && !ownTerritory(c, x0 + w / 2)) { if (why) why.push(off + ":terr"); continue; }
     let ok = true, mn = 1e9, mx = -1e9; const gys = [];
     for (let i = 0; i < w; i++) { const g = columnGround(x0 + i); if (g < 2) { ok = false; break; } gys.push(g); if (g < mn) mn = g; if (g > mx) mx = g; }
-    if (!ok || mx - mn > (opt.slope || 3)) continue;
+    if (!ok || mx - mn > (opt.slope || 3)) { if (why) why.push(off + (ok ? ":slope" + (mx - mn) : ":ground")); continue; }
     if (!opt.nomargin) { // keep a gap to neighbouring buildings
       let bad = false;
-      for (const mxx of [x0 - 1, x0 - 2, x0 + w, x0 + w + 1]) { if (mxx < 1 || mxx >= width - 1) continue; for (let y = 0; y < height; y++) { const o = pixelMap[mxx][y]; if (o) { if (elements[o.element].hzb) bad = true; break; } } if (bad) break; }
-      if (bad) continue;
+      for (const mxx of [x0 - 1, x0 - 2, x0 + w, x0 + w + 1]) { if (mxx < 1 || mxx >= width - 1) continue; for (let y = 0; y < height; y++) { const o = pixelMap[mxx][y]; if (o && !o.dec) { if (elements[o.element].hzb) bad = true; break; } } if (bad) break; }
+      if (bad) { if (why) why.push(off + ":margin"); continue; }
     }
-    return { x0: x0, y0: mn, gys: gys };
+    return { x0: x0, y0: mn, gys: gys, ag: [columnGround(x0 - 1), columnGround(x0 + w)] };
   }
   return null;
 }
 H2.findSite = findSite;
+function onPit(a, b) { for (const k of H2.cols) for (const q of (k.pits || [])) if (b >= q[0] && a <= q[1]) return true; return false; }
 
 /* ---- plans ----------------------------------------------------------------- */
 function queuePlan(c, type, opt) {
   opt = opt || {};
-  const bp = BLUEPRINTS[type](); const cost = costOfPlan(bp);
+  const bp = BLUEPRINTS[type](c, opt); const cost = costOfPlan(bp);
   const site = opt.site || findSite(c, bp.w, opt);
   if (!site) return null;
   const cells = [];
-  // foundation for uneven ground
-  if (site.gys && !bp.dug) for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= site.gys[i]; y++) cells.push([i, y - site.y0, "dirt"]);
+  // foundation for uneven ground (packed earth, so it neither crumbles nor grows grass inside the house)
+  if (site.gys && !bp.dug) {
+    const floor = bp.w >= 3;
+    for (let i = 0; i < bp.w; i++) for (let y = site.y0 + 1; y <= Math.max(site.gys[i], floor ? site.y0 + 1 : site.y0); y++) {
+      const dy = y - site.y0, col = dy === 1 ? (bp.floorC || bp.pathC) : bp.baseC;
+      cells.push([i, dy, "hz_earth", col ? { c: shade(col, dy === 1 ? 1 : (dy % 2 ? 0.96 : 1.04)) } : undefined]);
+    }
+    // level the ground right outside both ends so people can walk straight in and out of the doors
+    if (floor && site.ag && !opt.nomargin) {
+      // a gentle ramp (one cell per column) instead of a single deep cut or pillar: no trenches for people to get stuck in
+      const wx = (cx) => site.x0 + (opt.mirror ? bp.w - 1 - cx : cx);          // world column of a (pre-mirror) cell column
+      const hzbNear = (x, y0, y1) => { for (let y = Math.max(0, y0); y <= Math.min(height, y1); y++) { const o = inb(x, y) ? pixelMap[x][y] : null; if (o && !o.dec && elements[o.element] && elements[o.element].hzb) return true; } return false; };
+      [[-1, -1], [bp.w, 1]].forEach(([ax, sd]) => {
+        const g0 = columnGround(wx(ax));
+        if (g0 < 1 || g0 - site.y0 > 4 || site.y0 - g0 > 6) return;
+        const mode = g0 < site.y0 ? -1 : g0 > site.y0 ? 1 : 0;                  // -1: cut into higher ground, 1: build up lower ground
+        for (let k = 0; k <= 6; k++) {
+          const cx = ax + sd * k, x = wx(cx); if (x < 1 || x >= width - 1) break;
+          const g = k === 0 ? g0 : columnGround(x); if (g < 1) break;
+          const T = site.y0 + mode * k;                                               // stand level wanted in this column
+          if (mode < 0 ? g >= T : mode > 0 ? g <= T : k > 0) break;                   // the ramp meets the natural ground
+          if (k > 0 && hzbNear(x, Math.min(g, T) - 2, Math.max(g, T) + 1)) break;    // never undermine / bury a neighbour
+          if (mode < 0) for (let y = g + 1; y <= T; y++) cells.push([cx, y - site.y0, "__dig"]);
+          if (mode >= 0 || k === 0) for (let y = T + 1; y <= Math.max(T + 1, g); y++) cells.push([cx, y - site.y0, "hz_earth", bp.pathC ? { c: shade(bp.pathC) } : undefined]);
+        }
+      });
+      // clear the head room above the approach as well (plants, loose earth)
+      for (const ax of [-1, bp.w]) for (let dy = -2; dy <= 0; dy++) cells.push([ax, dy, "__dig"]);
+    }
+  }
   for (const cell of bp.cells) cells.push(cell.slice());
-  if (opt.mirror) for (const cell of cells) { cell[0] = bp.w - 1 - cell[0]; }
-  cells.sort((a, b) => (a[3] && a[3].late ? 1 : 0) - (b[3] && b[3].late ? 1 : 0) || (a[2] === "water" ? 1 : 0) - (b[2] === "water" ? 1 : 0) || b[1] - a[1] || a[0] - b[0]);
-  const plan = { id: c.plans.length + 1000 + Math.floor(rnd() * 1e6), type: type, x0: site.x0, y0: site.y0, x1: site.x0 + bp.w - 1, w: bp.w, cells: cells, i: 0, state: "ready", t0: pixelTicks, opt: opt, cost: cost, dir: opt.dir };
+  if (opt.mirror) for (const cell of cells) { cell[0] = bp.w - 1 - cell[0]; if (cell[3] && cell[3].sx !== undefined) cell[3] = Object.assign({}, cell[3], { sx: bp.w - 1 - cell[3].sx }); }
+  cells.sort((a, b) => (a[3] && a[3].late ? 1 : 0) - (b[3] && b[3].late ? 1 : 0) || (a[2] === "water" ? 1 : 0) - (b[2] === "water" ? 1 : 0) || (b[2] === "__dig" ? 1 : 0) - (a[2] === "__dig" ? 1 : 0) || b[1] - a[1] || a[0] - b[0]);
+  const plan = { id: c.plans.length + 1000 + Math.floor(rnd() * 1e6), type: type, x0: site.x0, y0: site.y0, x1: site.x0 + bp.w - 1, w: bp.w, cells: cells, i: 0, state: "ready", t0: pixelTicks, opt: opt, cost: cost, dir: opt.dir, beds: bp.beds || 0, style: bp.style };
   c.plans.push(plan);
   return plan;
 }
@@ -111,23 +167,20 @@ function planBuild(c) {
     if (pl.li !== pl.i) { pl.li = pl.i; pl.lt = pixelTicks; }
     else if (pl.state === "ready" && pixelTicks - (pl.lt || pl.t0) > 1500) { pl.i++; pl.lt = pixelTicks; }   // watchdog: skip a cell nobody can reach
     if (pl.i >= pl.cells.length) continue;
-    const next = pl.cells[pl.i]; const need = COST[next[2]];
-    let ok = true; if (need) for (const g in need) if ((c.stock[g] || 0) < need[g]) ok = false;
-    pl.state = ok ? "ready" : "stalled";
+    const next = pl.cells[pl.i];
+    pl.state = canPay(c, COST[next[2]]) ? "ready" : "stalled";
   }
   if (c.plans.length >= 2) return;
   const s = c.stock, pop = c.pop, adults = c.adults || 0;
-  const can = (type, frac) => affordable(c, costOfPlan(BLUEPRINTS[type]()), frac || 0.6);
+  const can = (type, frac) => affordable(c, costOfPlan(BLUEPRINTS[type](c)), frac || 0.6);
   const hasHall = !!c.hall;
   // housing first
-  const housing = c.beds + c.plans.filter((p) => p.type === "house" || p.type === "hut").reduce((n, p) => n + (p.type === "house" ? 2 : 1), 0);
+  const housing = c.beds + c.plans.reduce((n, p) => n + (p.beds || 0), 0);
+  const housePlanned = c.plans.some((p) => HOUSING[p.type]);
   if (!hasHall && pop >= 3 && can("hall", 0.55) && !c.plans.some((p) => p.type === "hall")) { if (queuePlan(c, "hall", { cx: c.x })) return; }
   if (haveCount(c, "campfire") === 0 && pop >= 2 && !c.plans.some((p) => p.type === "campfire") && s.wood >= 2) { if (queuePlan(c, "campfire", { cx: hasHall ? c.hall.x : c.x, range: 14 })) return; }
-  if (housing < pop + 1 && !c.plans.some((p) => p.type === "house" || p.type === "hut")) {
-    const t = (pop >= 4 && can("house", 0.6)) ? "house" : "hut";
-    if (can(t, 0.6)) { if (queuePlan(c, t)) return; }
-  }
-  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 })) return; }
+  if (haveCount(c, "well") === 0 && pop >= 3 && can("well", 0.8) && !c.plans.some((p) => p.type === "well")) { if (queuePlan(c, "well", { range: 30 }) || queuePlan(c, "well", { range: 60, slope: 5 })) return; }
+  if (housing < pop + 1 && !housePlanned) { if (planHouse(c, can)) return; }
   if (pop >= 5 && haveCount(c, "oven") === 0 && can("bakery", 0.7) && !c.plans.some((p) => p.type === "bakery")) { if (queuePlan(c, "bakery")) return; }
   if (pop >= 6 && haveCount(c, "market") === 0 && can("market", 0.7) && !c.plans.some((p) => p.type === "market")) { if (queuePlan(c, "market")) return; }
   if (pop >= 8 && haveCount(c, "forge") === 0 && can("forge", 0.7) && !c.plans.some((p) => p.type === "forge")) { if (queuePlan(c, "forge", { side: c.fac === 0 ? -1 : 1 })) return; }
@@ -136,11 +189,68 @@ function planBuild(c) {
   if (pop >= 9 && haveCount(c, "scarecrow") === 0 && s.wood >= 5 && (H2.crops || []).length > 6 && !c.plans.some((p) => p.type === "scarecrow")) { const sp = farmSpot({}, c); if (sp) { if (queuePlan(c, "scarecrow", { site: { x0: sp.x, y0: sp.y, gys: [sp.y] } })) return; } }
   if (H2.warPlan && H2.cfg.war) { if (H2.warPlan(c, can)) return; }
   // keep growing: one more house when everyone has a bed already and there are spare resources
-  if (pop >= 6 && housing < pop + 3 && s.wood > 80 && !c.plans.some((p) => p.type === "house") && can("house", 1)) { queuePlan(c, "house"); }
+  if (pop >= 6 && housing < pop + 3 && s.wood > 80 && !housePlanned && can("house", 1)) { if (planHouse(c, can)) return; }
+  // beautify the town once the basics are there
+  if (hasHall && housing >= pop && planDecor(c, can)) return;
 }
+const HOUSING = { hut: 1, house: 1, townhouse: 1 };
+// pick a dwelling for the town's size and wealth; dense townhouses once the town is crowded
+function planHouse(c, can) {
+  const pop = c.pop;
+  const order = [];
+  if (pop >= 8 && (c.crowded >= 1 || rnd() < 0.45)) order.push("townhouse");
+  if (pop >= 3) order.push("house");
+  if (pop >= 8 && !order.includes("townhouse")) order.push("townhouse");
+  order.push("hut");
+  for (const t of order) {
+    if (!can(t, t === "hut" ? 0.8 : 0.6)) continue;
+    if (queuePlan(c, t, { mirror: rnd() < 0.5 })) { c.crowded = 0; return true; }
+    if (t !== "hut") c.crowded = (c.crowded || 0) + 0.5;
+  }
+  return false;
+}
+// street lamps, flower gardens, a fountain and a statue between the houses
+function decorSite(c, w) {
+  const e = c.ext; if (!e) return null;
+  const cx = c.x, span = Math.max(cx - e[0], e[1] - cx) + 3;
+  for (let off = 0; off <= span; off++) for (const sg of [1, -1]) {
+    const x0 = Math.round(cx + sg * off - w / 2); if (x0 < 2 || x0 + w > width - 2 || x0 < e[0] - 3 || x0 + w - 1 > e[1] + 3) continue;
+    if (overlaps(c, x0, x0 + w - 1, 0) || !ownTerritory(c, x0)) continue;
+    let ok = true, mn = 1e9, mx = -1e9; const gys = [];
+    for (let i = 0; i < w; i++) {
+      const g = columnGround(x0 + i); if (g < 8) { ok = false; break; }
+      const t = at(x0 + i, g + 1); if (!t || t.element === "farmland" || t.element === "hz_crop") { ok = false; break; }
+      gys.push(g); mn = Math.min(mn, g); mx = Math.max(mx, g);
+    }
+    if (!ok || mx - mn > 0) continue;
+    for (let i = -1; i <= w && ok; i++) for (let y = mn - 9; y <= mn; y++) { const o = at(x0 + i, y); if (o && (isPerson(o) ? false : (i >= 0 && i < w) || elements[o.element].pass)) { ok = false; break; } }
+    if (!ok) continue;
+    return { x0: x0, y0: mn, gys: gys };
+  }
+  return null;
+}
+function planDecor(c, can) {
+  if (c.plans.length || c.famine || c.war.state === "war" || c.war.state === "siege" || pixelTicks - (c.lastDecor || 0) < 900) return false;
+  const pop = c.pop, b = c.built, s = c.stock;
+  const opts = [];
+  if (pop >= 12 && !b.fountain && s.stone >= 16) opts.push("fountain");
+  if (pop >= 18 && !b.statue && s.stone >= 24) opts.push("statue");
+  if ((b.lamp || 0) < Math.min(14, Math.floor(pop / 3)) && s.wood >= 25) opts.push("lamp");
+  if ((b.garden || 0) < Math.min(10, Math.floor(pop / 4))) opts.push("garden");
+  if (!opts.length) return false;
+  c.lastDecor = pixelTicks;
+  const t = opts[0] === "fountain" || opts[0] === "statue" ? opts[0] : pick(opts);
+  if (!can(t, 1)) return false;
+  const bp = BLUEPRINTS[t](c);
+  const site = decorSite(c, bp.w); if (!site) return false;
+  return !!queuePlan(c, t, { site: site, nomargin: true });
+}
+H2.planHouse = planHouse;
 H2.planBuild = planBuild;
 function completePlan(c, pl) {
   c.built[pl.type] = (c.built[pl.type] || 0) + 1;
+  if (pl.helpers && !DECOR[pl.type]) for (const id in pl.helpers) { const q = H2.byId[id]; if (q && !q.dead) { q.builtN = (q.builtN || 0) + 1; life(q, "Helped build " + (BUILD_NAMES[pl.type] || "a " + pl.type) + " in " + c.name + ".", "build"); } }
+  if (!DECOR[pl.type] && pl.type !== "moat" && pl.type !== "cannon") c.ext = c.ext ? [Math.min(c.ext[0], pl.x0), Math.max(c.ext[1], pl.x1)] : [pl.x0, pl.x1];
   if (MAJOR_BUILD[pl.type]) {
     let msg = c.name + " completes " + BUILD_NAMES[pl.type] + ".";
     if (pl.type === "wall") msg = "The great wall of " + c.name + " stands complete.";
@@ -153,12 +263,74 @@ function completePlan(c, pl) {
   census(true);
 }
 
+// create one blueprint cell in the world, with its colour and settlement metadata
+// building materials: when the quarry cannot keep up, a wealthy wood store trades for stone (2 wood per stone)
+const STONE_SWAP = 2, WOOD_RESERVE = 25;
+function canPay(c, need) {
+  if (!need) return true;
+  for (const g in need) if ((c.stock[g] || 0) < need[g] && !(g === "stone" && c.stock.wood - WOOD_RESERVE >= (need[g] - Math.max(0, c.stock.stone)) * STONE_SWAP + (need.wood || 0))) return false;
+  return true;
+}
+function payFor(c, need) {
+  if (!canPay(c, need)) return false;
+  for (const g in need) {
+    if (g === "stone" && c.stock.stone < need.stone) { const have = Math.max(0, c.stock.stone); c.stock.stone -= have; c.stock.wood -= (need.stone - have) * STONE_SWAP; }
+    else c.stock[g] -= need[g];
+  }
+  return true;
+}
+H2.canPay = canPay;
+function placeCell(c, pl, cell) {
+  const el = cell[2], cx = pl.x0 + cell[0], cy = pl.y0 + cell[1];
+  if (!inb(cx, cy) || !elements[el]) return null;
+  createPixel(el, cx, cy);
+  const n = pixelMap[cx][cy];
+  if (n) {
+    const info = elements[el];
+    if (info && (info.st || info.door || el === "hz_cloth" || el === "hz_cannon")) { n.fac = c.fac; n.ay = pl.y0; }
+    if (info && info.hzb) { n.hzb2 = 1; n.fac = c.fac; n.cid = c.id; if (DECOR[pl.type]) n.dec = 1; }
+    const o3 = cell[3];
+    if (o3) {
+      if (o3.c) n.color = o3.c;
+      if (o3.sx !== undefined) { n.sx = pl.x0 + o3.sx; n.uf = pl.y0 + o3.uf; }
+      if (o3.ay !== undefined) n.ay = pl.y0 + o3.ay;
+      if (o3.nm) n.nm = o3.nm;
+      if (o3.flag) n.color = FAC[c.fac].flag;
+    }
+    if (el === "hz_cannon") { n.dir = pl.dir || (c.fac === 0 ? 1 : -1); n.ammo = 0; n.cd = 0; n.cid = c.id; }
+    if (el === "hz_stone" || el === "hz_plank" || el === "hz_roof" || el === "hz_palisade") n.fac = c.fac;
+  }
+  return n;
+}
+H2.placeCell = placeCell;
+// instantly raise a whole building (used by the "blueprint" tools and tests); ignores cost
+function instantBuild(c, pl) {
+  for (const cell of pl.cells) {
+    const x = pl.x0 + cell[0], y = pl.y0 + cell[1]; if (!inb(x, y)) continue;
+    const o = pixelMap[x][y];
+    if (cell[2] === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb) deletePixel(x, y); continue; }
+    if (o) { if (isPerson(o) || (elements[o.element].hzb && o.element !== "hz_earth" && !o.dec)) continue; deletePixel(x, y); }
+    placeCell(c, pl, cell);
+  }
+  const i = c.plans.indexOf(pl); if (i >= 0) c.plans.splice(i, 1);
+  completePlan(c, pl);
+}
+H2.instantBuild = instantBuild;
+
 /* ---- the build task ----------------------------------------------------------- */
 function cellOpenFor(p, x, y) { return true; }
 TASKS.build = function (p, t) {
   const c = colById(p.col); if (!c) return "done";
   const pl = c.plans[0] && c.plans[0].state !== "stalled" ? c.plans[0] : c.plans.find((q) => q.state !== "stalled");
   if (!pl) return "done";
+  // skip cells that need no work (already placed, nothing to dig) without spending the builder's time
+  for (let n = 0; n < 12 && pl.i < pl.cells.length; n++) {
+    const k = pl.cells[pl.i], kx = pl.x0 + k[0], ky = pl.y0 + k[1];
+    if (!inb(kx, ky)) { pl.i++; continue; }
+    const ko = pixelMap[kx][ky];
+    if (k[2] === "__dig" ? !ko || (!isPerson(ko) && (elements[ko.element].hzb || elements[ko.element].state === "liquid")) : ko && ko.element === k[2] && !isPerson(ko)) { pl.i++; continue; }
+    break;
+  }
   if (pl.i >= pl.cells.length) return "done";
   const cell = pl.cells[pl.i];
   const el = cell[2], cx = pl.x0 + cell[0], cy = pl.y0 + cell[1];
@@ -167,32 +339,36 @@ TASKS.build = function (p, t) {
   if (r === "fail") { t.fail = (t.fail || 0) + 1; if (t.fail > 3) { pl.i++; t.fail = 0; } return "done"; }
   if (r !== "arrive" && Math.abs(p.x - cx) > 5) return;
   if (pixelTicks < (p.buildCool || 0)) return;
-  p.buildCool = pixelTicks + 9;
+  p.buildCool = pixelTicks + (QUICK[el] ? 2 : Math.max(3, Math.round(6 - (p.sk.build || 0) * 0.6)));
   // is the cell already done?
   const o = pixelMap[cx][cy];
+  if (o && isTreePart(o) && !o.hzb2) {                                                         // a tree on the site: fell it whole, the wood goes to the store
+    const w0 = p.inv.wood || 0; fellTree(p, treeBase(o) || o); c.stock.wood += (p.inv.wood || 0) - w0; p.inv.wood = w0;
+    if (pixelMap[cx][cy] && isTreePart(pixelMap[cx][cy])) deletePixel(cx, cy);
+    return;
+  }
   if (el === "__dig") { if (o && !isPerson(o) && !elements[o.element].hzb && elements[o.element].state !== "liquid") deletePixel(cx, cy); pl.i++; return; }
   if (o && o.element === el) { pl.i++; return; }
   if (o) {
-    if (isPerson(o)) { t.wait = (t.wait || 0) + 1; if (t.wait > 25) { pl.i++; t.wait = 0; } return; }
-    const oi = elements[o.element];
-    if (oi.hzb && !(el === "water")) { pl.i++; return; }                                   // someone else's wall
+    if (isPerson(o)) {
+      // somebody is standing where a block goes: lift them on top of it (foundations) or wait for them to move on
+      const b = o.element === "hz_head" ? at(o.x, o.y + 1) : o;
+      if (el === "hz_earth" && b && b.id !== undefined && !b.dead) { shift(b, 0, -1) || shift(b, 0, -1, true); if (isPerson(pixelMap[cx][cy])) shift(b, 0, -1); }
+      else if (b && b.id !== undefined && !b.dead && !b.sleeping && b !== p) { const d = b.x >= p.x ? 1 : -1; shift(b, d, 0) || shift(b, -d, 0) || shift(b, d, -1) || shift(b, -d, -1); }   // "excuse me": the worker steps aside
+      else if (b === p) { const d = cx >= pl.x0 + pl.w / 2 ? -1 : 1; tryWalk(p, d, false) || tryWalk(p, -d, false); }   // the builder is in their own way
+      if (isPerson(pixelMap[cx][cy])) { t.wait = (t.wait || 0) + 1; if (t.wait > 60) { pl.i++; t.wait = 0; } return; }
+    }
+  }
+  const o2 = pixelMap[cx][cy];
+  if (o2) {
+    const oi = elements[o2.element];
+    if (oi.hzb && !o2.dec && !(el === "water")) { pl.i++; return; }                                   // someone else's wall
     if (el === "water" && oi.state === "liquid") { pl.i++; return; }
     deletePixel(cx, cy);                                                                      // clear brush, leaves, loose stuff
   }
-  const need = COST[el] || {};
-  for (const g in need) if ((c.stock[g] || 0) < need[g]) { pl.state = "stalled"; return "done"; }
-  for (const g in need) c.stock[g] -= need[g];
-  createPixel(el, cx, cy);
-  const n = pixelMap[cx][cy];
-  if (n) {
-    const info = elements[el];
-    if (info && (info.st || info.door || el === "hz_cloth" || el === "hz_cannon")) { n.fac = c.fac; n.ay = pl.y0; }
-    if (info && info.hzb) n.hzb2 = 1;
-    if (cell[3] && cell[3].flag) { n.color = FAC[c.fac].flag; }
-    if (el === "hz_cannon") { n.dir = pl.dir || (c.fac === 0 ? 1 : -1); n.ammo = 0; n.cd = 0; n.cid = c.id; }
-    if (el === "hz_stone" || el === "hz_plank" || el === "hz_roof" || el === "hz_palisade") n.fac = c.fac;
-  }
-  pl.i++; p.sk.build += 0.05;
+  if (!payFor(c, COST[el])) { pl.state = "stalled"; return "done"; }
+  placeCell(c, pl, cell);
+  pl.i++; p.sk.build += 0.05; (pl.helpers || (pl.helpers = {}))[p.id] = 1;
 };
 
 /* ---- children --------------------------------------------------------------- */
@@ -206,6 +382,8 @@ function pregnancyAndBirths(c) {
       if (pixelTicks >= w.preg && !w.sleeping) {
         const sp = H2.byId[w.sp];
         const x = w.x + (rnd() < 0.5 ? -1 : 1), y = w.y;
+        const bw = inb(x, y) && pixelMap[x][y];
+        if (bw && !isPerson(bw) && elements[bw.element].pass && !elements[bw.element].stair) openDoor(bw);   // indoors: step in front of the back wall
         if (isEmpty(x, y)) {
           w.preg = 0; w.lastBirth = pixelTicks;
           const tr = rollTraits([w.tr, sp && sp.tr]);
@@ -214,6 +392,8 @@ function pregnancyAndBirths(c) {
             w.kids.push(kid.id); if (sp) sp.kids.push(kid.id);
             c.births++; H2.stats.births++;
             addThought(w, "newborn", 20, DAY * 2); if (sp) addThought(sp, "newborn", 20, DAY * 2);
+            life(kid, "Born in " + c.name + " to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", "birth");
+            life(w, "Gave birth to " + kid.first + ".", "child"); if (sp) life(sp, "Became a parent of " + kid.first + ".", "child");
             chronicle("A child, " + kid.first + " " + kid.sn + ", was born to " + nm(w) + (sp ? " and " + nm(sp) : "") + ".", true, w.fac);
           }
         }
@@ -224,8 +404,8 @@ function pregnancyAndBirths(c) {
     const sp = H2.byId[w.sp]; if (!sp || sp.dead) continue;
     const a = ageOf(w); if (a < CHILD_T * 1.4 || a > LIFE_T * 0.55) continue;
     if (pixelTicks - (w.lastBirth || -1e9) < DAY * 2.5) continue;
-    if (H2.people.length >= H2.cfg.maxPeople) continue;
-    if (c.beds < c.pop + 0 || food < c.pop * 1.5 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
+    if (H2.people.length >= H2.cfg.maxPeople || (H2.facPop && H2.facPop[c.fac] >= H2.cfg.maxPerFaction)) continue;
+    if (c.beds * 2 < c.pop || food < c.pop * 1.1 || c.tension >= 4 || w.hu < 40 || w.sick) continue;
     if (rnd() < 0.05) w.preg = pixelTicks + Math.floor(DAY * 0.5);
   }
 }

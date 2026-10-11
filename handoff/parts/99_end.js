@@ -8,8 +8,12 @@ function doorsTick() {
     const r = d[i];
     if (pixelTicks < r.t) continue;
     if (!inb(r.x, r.y)) { d.splice(i, 1); continue; }
-    if (!pixelMap[r.x][r.y]) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.fac = r.fac; if (r.color) n.color = r.color; if (r.hp !== undefined) n.hp = r.hp; } d.splice(i, 1); }
-    else { r.t = pixelTicks + 8; r.w = (r.w || 0) + 1; if (r.w > 60) d.splice(i, 1); }
+    if (!elements[r.el]) { d.splice(i, 1); continue; }
+    const o = pixelMap[r.x][r.y];
+    if (!o) { createPixel(r.el, r.x, r.y); const n = pixelMap[r.x][r.y]; if (n) { n.hzb2 = 1; const k = r.keep || r; for (const key in k) if (key !== "x" && key !== "y" && key !== "el" && key !== "t" && key !== "w" && key !== "keep") n[key] = k[key]; } d.splice(i, 1); }
+    else if (!isPerson(o) && kindOf(o) !== 1 && !(o.element === r.el)) { d.splice(i, 1); }       // something else was built/fell here
+    else if (o.element === r.el) { d.splice(i, 1); }
+    else { r.t = pixelTicks + 8; r.w = (r.w || 0) + 1; if (r.w > 900) d.splice(i, 1); }
   }
 }
 runEveryTick(function () {

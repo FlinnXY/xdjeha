@@ -1,0 +1,164 @@
+// Test for 08_trade.js + 09_events.js : run with
+//   SANDBOXELS_SRC=/tmp/engine/src node t_events.js
+const { setup, terrain } = require('./sim');
+
+(async () => {
+  const r = await setup();
+  const w = r.w, H2 = w.H2;
+  terrain(r);                      // default terrain: proven to keep villages healthy (water + wood)
+  w.paused = false; w.manualPaused = false;
+
+  const log = (...a) => console.log(...a);
+  const groundAt = (x) => { for (let y = 2; y < w.height - 1; y++) { const px = w.pixelMap[x] && w.pixelMap[x][y]; if (px && px.element !== 'water') return y - 1; } return 40; };
+  const towns = () => H2.cols.filter(c => !c.nomad && c.pop > 0);
+  const chronTail = (n) => H2.chron.slice(-n).map(e => (e.major ? '* ' : '  ') + 'd' + e.day + ' ' + e.text);
+  const nomads = (k) => H2.people.filter(p => p.nomad === k && !p.dead && !p.del);
+
+  // ---- establish two villages -------------------------------------------
+  H2.cfg.events = false;            // no random world events while the villages establish
+  r.put('hz_azure_party', 20, 40);
+  r.put('hz_crimson_party', 135, 40);
+  log('booting villages...');
+  r.run(3000);
+  let ts = towns();
+  log('after 3000t, towns:', ts.map(c => c.name + ' fac' + c.fac + ' pop' + c.pop + ' hall' + (c.hall ? 'Y' : 'N')).join(' | '));
+  if (ts.length < 2) { r.run(2500); ts = towns(); log('after 5500t, towns:', ts.map(c => c.name + ' pop' + c.pop + ' hall' + (c.hall ? 'Y' : 'N')).join(' | ')); }
+
+  const A = ts[0], B = ts[1] || ts[0];
+
+  // keep peace + hold the auto-scheduler quiet so each event is exercised on its own
+  const makePeace = () => { H2.war.on = false; for (const c of H2.cols) { c.tensionPts = 0; c.tension = 0; if (c.war) c.war.state = 'peace'; } };
+  const calm = () => { makePeace(); const T = w.pixelTicks; const tm = H2.events.timers; tm.festival = T; tm.trader = T; tm.bandits = T; tm.plague = T; };
+  H2.cfg.war = false; H2.cfg.verbose = false; H2.cfg.events = true; calm();
+
+  // ===================== TRADE ==========================================
+  log('\n=== TRADE ===');
+  calm();
+  // open a tree-free walking corridor between the two towns so a caravan can travel
+  const clearCorridor = () => {
+    const x0 = Math.max(1, Math.min(A.x, B.x) - 4), x1 = Math.min(w.width - 1, Math.max(A.x, B.x) + 4);
+    for (let x = x0; x <= x1; x++) {
+      for (let y = 2; y < w.height; y++) {
+        const px = w.pixelMap[x] && w.pixelMap[x][y];
+        if (px && ['wood', 'plant', 'leaf', 'tree_branch', 'seed'].includes(px.element)) w.deletePixel(x, y);
+      }
+    }
+  };
+  clearCorridor();
+  // create a strong surplus/shortage so a caravan is worthwhile
+  A.stock.wood = 260; A.stock.stone = 180; A.stock.coin = 300;
+  B.stock.wood = 0; B.stock.stone = 2; B.stock.coin = 300; B.stock.bread = 80; B.stock.grain = 60;
+  A.stock.bread = 4; A.stock.grain = 2;                       // A is short of food -> should buy
+  // give both towns a market so a merchant job sticks and has somewhere to trade
+  const addMarket = (c) => { const bx = (c.hall ? c.hall.x : c.x) + 2; r.put('hz_stall', bx, Math.max(2, groundAt(c.hall ? c.hall.x : c.x) - 1)); };
+  addMarket(A); addMarket(B);
+  r.run(150);                                                 // let census register the markets
+  const pickMerchant = () => H2.people.find(p => p.col === A.id && !p.dead && !p.nomad && w.H2.stageOf(p) === 'adult');
+  let mm = pickMerchant(); if (mm) H2.setJob(mm, 'merchant');
+  if (mm) log('shouldTrade(merchant,' + A.name + ') =', H2.shouldTrade(mm, A));
+  const routes0 = H2.trade.routes.length;
+  // let jobThink drive the merchant naturally (it re-issues the caravan each day after sleep)
+  for (let i = 0; i < 90 && H2.trade.routes.length === routes0; i++) {
+    calm(); clearCorridor();
+    let p = pickMerchant();
+    if (p && p.job !== 'merchant') H2.setJob(p, 'merchant');
+    r.run(120);
+  }
+  log('trade.stats:', JSON.stringify(H2.trade.stats));
+  log('trade.routes (+' + (H2.trade.routes.length - routes0) + '):', H2.trade.routes.slice(-4).map(x => x.from + '->' + x.to + ' s' + x.sold + ' b' + x.bought + ' coin' + x.coin).join(' | '));
+  log('trade.pairs:', JSON.stringify(H2.trade.pairs));
+  log('B.stock.wood now:', Math.round(B.stock.wood), '| tensionPts A/B:', Math.round(A.tensionPts || 0), Math.round(B.tensionPts || 0));
+
+  // ===================== FESTIVAL =======================================
+  log('\n=== FESTIVAL ===');
+  calm();
+  const moodBefore = Math.round(A.avgMood || 0);
+  const okF = H2.events.trigger('festival', A.x);
+  log('trigger festival:', okF, 'A.festival set:', A.festival > w.pixelTicks);
+  const festTasks = () => H2.people.filter(p => p.task && p.task.k === 'festival').length;
+  let maxGoers = 0;
+  for (let i = 0; i < 8; i++) { r.run(120); maxGoers = Math.max(maxGoers, festTasks()); }
+  log('max festival-goers:', maxGoers);
+  r.run(600);
+  log('mood A before/after festival:', moodBefore, '->', Math.round(A.avgMood || 0));
+
+  // ===================== WANDERING TRADER ===============================
+  log('\n=== WANDERING TRADER ===');
+  calm();
+  const okT = H2.events.trigger('trader');
+  let maxTraders = 0;
+  for (let i = 0; i < 20; i++) { r.run(300); calm(); maxTraders = Math.max(maxTraders, nomads('trader').length); }
+  log('trigger trader:', okT, 'maxTradersSeen:', maxTraders, 'tradersNow:', nomads('trader').length,
+      'traderEvents:', H2.events.last.filter(e => e.name === 'trader').length);
+
+  // ===================== BANDIT RAID ====================================
+  log('\n=== BANDIT RAID ===');
+  calm();
+  const tgt = (towns().sort((a, b) => b.pop - a.pop)[0]) || A;
+  const defenders = () => H2.people.filter(p => p.col === tgt.id && !p.dead && !p.nomad && w.H2.stageOf(p) === 'adult').slice(0, 5);
+  const armDefenders = () => { for (const p of defenders()) { if (p.job !== 'soldier') H2.setJob(p, 'soldier'); p.wpn = 'sword'; p.sk.fight = 6; } };
+  armDefenders();
+  log('defenders in ' + tgt.name + ':', defenders().length);
+  const okB = H2.events.trigger('bandits', tgt.x);
+  let maxBandits = 0, retreatSeen = false;
+  for (let i = 0; i < 30; i++) {
+    calm(); armDefenders();
+    r.run(200);
+    maxBandits = Math.max(maxBandits, nomads('bandit').length);
+    const raidIds = H2._raids ? Object.keys(H2._raids) : [];
+    if (raidIds.some(id => H2._raids[id].retreat)) retreatSeen = true;
+    if (nomads('bandit').length === 0 && i > 3) break;
+  }
+  const heroes = H2.people.filter(p => (p.log || []).some(e => /Fought off bandits/.test(e.text)));
+  log('trigger bandits:', okB, 'maxBanditsSeen:', maxBandits, 'banditsNow:', nomads('bandit').length,
+      'retreatSeen:', retreatSeen, 'heroes(FoughtOffBandits):', heroes.length);
+
+  // ===================== GOD-EVENT SPAWNER ELEMENTS =====================
+  log('\n=== GOD-EVENT ELEMENTS ===');
+  calm();
+  const placeAt = (el, x) => {
+    const yy = 4;                                    // empty sky cell: guarantees onPlace runs
+    const before = H2.events.last.length;
+    r.put(el, x, yy);
+    const cleared = !w.pixelMap[x][yy] || w.pixelMap[x][yy].element !== el;
+    return { el, placed: true, pixelCleared: cleared, eventLogged: H2.events.last.length > before };
+  };
+  const t2 = towns();
+  if (t2.length) {
+  for (const [el, x] of [['hz_event_festival', t2[0].x], ['hz_event_trader', t2[0].x + 4],
+                         ['hz_event_bandits', (t2[1] || t2[0]).x], ['hz_event_plague', t2[0].x]]) {
+    const res = placeAt(el, x);
+    log(el, '-> pixelCleared:', res.pixelCleared, 'eventLogged:', res.eventLogged);
+    r.run(500); calm();
+  }
+  }
+  r.run(2000);   // let the element-spawned events resolve
+  calm();
+
+  // ===================== PLAGUE (last: it is destructive) ===============
+  log('\n=== PLAGUE ===');
+  calm();
+  const sickBefore = H2.people.filter(p => p.sick).length;
+  const tgtP = (towns().sort((a, b) => b.pop - a.pop)[0]) || A;
+  const okP = H2.events.trigger('plague', tgtP.x);
+  r.run(60);
+  const sickAfter = H2.people.filter(p => p.sick && p.sick.k === 'plague').length;
+  log('trigger plague:', okP, 'plague-sick before/after:', sickBefore, '->', sickAfter);
+
+  // ===================== WRAP UP ========================================
+  log('\n=== CHRONICLE TAIL ===');
+  chronTail(16).forEach(l => log(l));
+  log('\nevents.last:', H2.events.last.map(e => e.name + '@d' + e.day).join(', '));
+  log('nomad colonies remaining:', H2.cols.filter(c => c.nomad).length,
+      '| live towns:', towns().length,
+      '| people:', H2.people.length);
+
+  const errs = r.errors.filter(e => !/style\.css|adsbygoogle/.test(e));
+  log('\nLASTERR:', H2.lastError ? String(H2.lastError.stack || H2.lastError).slice(0, 500) : null);
+  log('ERR count:', errs.length);
+  if (errs.length) errs.slice(0, 6).forEach(e => log('  ', e));
+
+  const ok = !H2.lastError && errs.length === 0;
+  log(ok ? '\nEVENTS_OK' : '\nEVENTS_FAIL');
+  process.exit(0);
+})().catch(e => { console.log('THROWN', e && e.stack); process.exit(1); });

@@ -119,14 +119,14 @@ function damageBlock(o, dmg) {
 H2.damageBlock = damageBlock;
 
 /* ---- projectiles --------------------------------------------------------------- */
-function launch(kind, x, y, tx, ty, fac, owner, power) {
+function launch(kind, x, y, tx, ty, fac, owner, power, fire) {
   if (!inb(x, y) || pixelMap[x][y]) return false;
   const el = kind === "ball" ? "hz_ball" : "hz_arrow";
   const speed = kind === "ball" ? 1.7 : 1.5, g = kind === "ball" ? 0.04 : 0.035;
   const dx = tx - x, dy = ty - y; const t = Math.max(4, Math.abs(dx) / speed);
   createPixel(el, x, y); const pr = pixelMap[x][y]; if (!pr || pr.element !== el) return false;
   pr.fx = x; pr.fy = y; pr.vx = (dx >= 0 ? 1 : -1) * Math.min(speed, Math.abs(dx) / t * 1); pr.vx = dx / t; pr.vy = (dy - 0.5 * g * t * t) / t; pr.g = g;
-  pr.fac = fac; pr.owner = owner; pr.dmg = power; pr.life = 160; pr.born = pixelTicks;
+  pr.fac = fac; pr.owner = owner; pr.dmg = power; pr.life = 160; pr.born = pixelTicks; if (fire) { pr.fire = 1; pr.color = "#ff8a2a"; }
   return true;
 }
 H2.launch = launch;
@@ -141,10 +141,10 @@ function projectileTick(p, kind) {
     const o = pixelMap[nx][ny];
     if (o && !o.del) {
       if (kind === "arrow") {
-        if (isPerson(o)) { const tgt = o.element === "hz_head" ? at(o.x, o.y + 1) : o; if (tgt && tgt.fac !== p.fac && tgt.hp !== undefined && !tgt.dead) { hurt(tgt, p.dmg * (1 - 0.22 * (tgt.arm || 0)) * (o.element === "hz_head" ? 1.6 : 1), "arrow", H2.byId[p.owner]); deletePixel(p.x, p.y); return; } else continue; }
+        if (isPerson(o)) { const tgt = o.element === "hz_head" ? at(o.x, o.y + 1) : o; if (tgt && tgt.fac !== p.fac && tgt.hp !== undefined && !tgt.dead) { hurt(tgt, p.dmg * (1 - 0.22 * (tgt.arm || 0)) * (o.element === "hz_head" ? 1.6 : 1), "arrow", H2.byId[p.owner]); if (p.fire && rnd() < 0.3 && !tgt.dead) tgt.burning = true; deletePixel(p.x, p.y); return; } else continue; }
         const e = elements[o.element];
         if (e && e.hzb && o.fac !== undefined && o.fac !== p.fac) damageBlock(o, 1);
-        if (kindOf(o) === 2) { deletePixel(p.x, p.y); return; }
+        if (kindOf(o) === 2) { const ax = p.x, ay = p.y, fire = p.fire && o.fac !== undefined && o.fac !== p.fac; deletePixel(p.x, p.y); if (fire && rnd() < 0.5 && elements.fire && isEmpty(ax, ay)) createPixel("fire", ax, ay); return; }
       } else {
         if (isPerson(o) && (o.fac === p.fac || o.dead)) continue;
         if (kindOf(o) !== 1) { ballImpact(p, nx, ny); return; }
@@ -222,6 +222,7 @@ function lovePangs(q) {
   if (rnd() < 0.5 && q.id < l.id) { // defect for love
     const nc = colById(l.col); if (!nc) return;
     chronicle(nm(q) + " abandons the " + FAC[q.fac].name + " cause to be with " + nm(l) + "! A traitor — or a lover?", true, q.fac);
+    life(q, "Defected to the " + FAC[l.fac].name + "s for love of " + nm(l) + ".", "defect");
     q.fac = l.fac; q.col = nc.id; q.defected = true; q.job = "laborer"; q.color = bodyColor(q); q.task = null; q.sp = l.id; l.sp = q.id; q.lover = 0; l.lover = 0;
     const h = headOf(q); if (h) h.fac = q.fac;
     marry(q, l);
@@ -327,7 +328,7 @@ TASKS.envoy = function (p, t) {
         c.tensionPts = Math.max(0, c.tensionPts - 28); rc.tensionPts = Math.max(0, rc.tensionPts - 28);
         c.stock.coin = Math.max(0, c.stock.coin - 10); rc.stock.coin += 10;
         chronicle("PEACE ENVOY: " + nm(p) + " of " + c.name + " is received by " + rc.name + ". Tensions ease between the " + FAC[c.fac].name + "s and the " + FAC[rc.fac].name + "s.", true, c.fac);
-        addThought(p, "diplomat", 15, DAY * 2);
+        addThought(p, "diplomat", 15, DAY * 2); life(p, "Brokered peace with " + rc.name + " as an envoy.", "envoy");
       }
       t.phase = 1;
     }
@@ -384,8 +385,8 @@ TASKS.fight = function (p, t) {
         p.cool = pixelTicks + cd;
         if (p.wpn === "rifle" && elements.left_bullet && rnd() < 0.5) {
           const bx = p.x + Math.sign(dx), by = p.y - 1; if (isEmpty(bx, by)) createPixel(dx > 0 ? "right_bullet" : "left_bullet", bx, by);
-          else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01));
-        } else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01));
+          else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p));
+        } else launch("arrow", p.x, p.y - 2, q.x, q.y - 1, p.fac, p.id, w.dmg * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p));
         p.sk.fight += 0.03;
       }
       if (d < 6) tryWalk(p, -Math.sign(dx), true);       // kite
@@ -451,6 +452,7 @@ TASKS.scout = function (p, t) {
   if (r === "arrive" || r === "fail" || pixelTicks - t.t1 > 3500) {
     I.reports = (I.reports || 0) + 1; I.last = pixelTicks;
     const e = estimateEnemy(c);
+    life(p, "Scouted the enemy and reported back to " + c.name + ".", "scout"); p.xp = (p.xp || 0) + 3;
     if (E.known) chronicle(nm(p) + " returns to " + c.name + " and reports: ~" + Math.round(e.sold) + " soldiers" + (E.cannons ? ", " + Math.round(E.cannons) + " cannons" : "") + (E.walls > 4 ? ", walls" : "") + (E.towers ? ", towers" : "") + ".", true, c.fac);
     else chronicle(nm(p) + " returns with little news; the strangers' home remains unknown.", false, c.fac);
     c.tensionPts += 3; return "done";
@@ -527,7 +529,8 @@ TASKS.post = function (p, t) {
   if (H2.war.on && pixelTicks >= (p.cool || 0)) {
     let best = null, bd = 1e9;
     for (const q of H2.people) { if (q.fac === p.fac || q.dead) continue; const dx = Math.abs(q.x - po.x); if (dx > 40 || Math.abs(q.y - po.y) > 34) continue; if (dx < bd) { bd = dx; best = q; } }
-    if (best) { p.cool = pixelTicks + 34; launch("arrow", po.x, po.y - 1, best.x, best.y - 1, p.fac, p.id, 6 * (1 + p.sk.fight * 0.01)); p.sk.fight += 0.04; }
+    if (best) { p.cool = pixelTicks + 34; launch("arrow", po.x, po.y - 1, best.x, best.y - 1, p.fac, p.id, 6 * (1 + p.sk.fight * 0.01), H2.fireArrow && H2.fireArrow(p)); p.sk.fight += 0.04; p.xp = (p.xp || 0) + 0.2;
+      if (H2.dropRock) H2.dropRock(p, po, best); }
   }
 };
 TASKS.load = function (p, t) {

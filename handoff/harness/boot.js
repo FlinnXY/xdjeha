@@ -1,9 +1,13 @@
 const {JSDOM, VirtualConsole, requestInterceptor} = require('jsdom');
-const intercept = requestInterceptor((req)=>{ const m=req.url.match(/^http:\/\/localhost\/mods\/(.+)$/); if(!m) return; for(const c of ['/home/claude/engine/src/mods/'+m[1],'/home/claude/'+m[1]]) if(fs.existsSync(c)) return new Response(fs.readFileSync(c),{headers:{'Content-Type':'application/javascript'}}); console.log('MISSING MOD',m[1]); return new Response('',{status:404}); });
 const fs = require('fs');
 const path = require('path');
+// Sandboxels engine source (clone of https://github.com/R74nCom/sandboxels). Override with SANDBOXELS_SRC.
+const ENGINE = process.env.SANDBOXELS_SRC || '/home/claude/engine/src';
+// the freshly built mod (handoff/Humanitize2.js) is served before any engine mod of the same name
+const MOD_DIRS = [path.join(__dirname, '..'), path.join(ENGINE, 'mods')];
+const intercept = requestInterceptor((req)=>{ const m=req.url.match(/^http:\/\/localhost\/mods\/(.+)$/); if(!m) return; for(const d of MOD_DIRS){ const c=path.join(d,m[1]); if(fs.existsSync(c)) return new Response(fs.readFileSync(c),{headers:{'Content-Type':'application/javascript'}}); } console.log('MISSING MOD',m[1]); return new Response('',{status:404}); });
 async function boot(modFiles=[], opts={}) {
-  const html = fs.readFileSync('/home/claude/engine/src/index.html','utf8')
+  const html = fs.readFileSync(path.join(ENGINE,'index.html'),'utf8')
     // drop external scripts and ads
     .replace(/<script async src="https:\/\/www\.googletagmanager[^>]*><\/script>/g,'');
   const vc = new VirtualConsole();

@@ -1,7 +1,7 @@
 const {setup,terrain}=require('./sim');
 (async()=>{
  const r=await setup(); const w=r.w; const T=terrain(r);
- w.paused=false;w.manualPaused=false;
+ w.paused=false;w.manualPaused=false; if(process.env.NOEV) w.H2.cfg.events=false;
  r.put('hz_azure_party',20,40); r.put('hz_crimson_party',135,40);
  const N=+process.argv[2]||10000; const step=500; let shown=0; const causes={};
  for(let t=0;t<N;t+=step){ r.run(step);
@@ -9,6 +9,6 @@ const {setup,terrain}=require('./sim');
    console.log(w.pixelTicks, line);
    while(shown<w.H2.chron.length){ const e=w.H2.chron[shown++]; if(e.major) console.log('   *',e.text); }
  }
- console.log('ERR',r.errors.filter(e=>!/style.css|adsbygoogle/.test(e)).slice(0,6));
+ console.log('LASTERR', w.H2.lastError ? String(w.H2.lastError.stack).slice(0,400) : null); console.log('ERR',r.errors.filter(e=>!/style.css|adsbygoogle/.test(e)).slice(0,6));
  process.exit(0);
 })();
