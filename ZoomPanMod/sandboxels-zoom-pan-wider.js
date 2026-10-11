@@ -123,7 +123,7 @@
   // is heading. (ox, oy) is the canvas offset in whole px from its default,
   // centred position. `anchor` is the point of the scene (as fractions of its
   // size) that must stay under the client position (cx, cy) while zooming.
-  const st = { ln: 0, target: 0, ox: 0, oy: 0, anchor: null, raf: 0, last: 0 };
+  const st = { ln: 0, target: 0, ox: 0, oy: 0, anchor: null, raf: 0, last: 0, active: false };
   let canvasEl = null, viewEl = null, slider = null, label = null;
   let sliderDragging = false;
   let pan = null;
@@ -234,19 +234,25 @@
     paint();
   }
 
-  function step(now) {
+  // IMPORTANT: time is measured with performance.now(), NOT the timestamp that
+  // requestAnimationFrame hands over. On a heavy scene the game's own draw callback
+  // runs first in every frame and takes 50ms+, which makes that timestamp stale
+  // and turned the old delta-time into ~0 (so the zoom barely moved).
+  function step() {
     st.raf = 0;
-    const dt = Math.min(250, Math.max(0, now - st.last));   // large steps are fine: the smoothing is exact for any dt
-    st.last = now;
+    const t = performance.now();
+    const dt = Math.min(500, Math.max(0, t - st.last));   // the smoothing is exact for any dt
+    st.last = t;
     st.ln += (st.target - st.ln) * (1 - Math.exp(-dt / SMOOTH_MS));
     if (Math.abs(st.target - st.ln) < 0.0004) st.ln = st.target;
     applyZoom();
     if (st.ln !== st.target) schedule();
+    else st.active = false;
   }
 
   function schedule() {
     if (st.raf) return;
-    st.last = performance.now();
+    if (!st.active) { st.active = true; st.last = performance.now(); }
     st.raf = requestAnimationFrame(step);
   }
 
@@ -269,6 +275,7 @@
 
   function resetView() {
     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+    st.active = false;
     st.ln = 0; st.target = 0; st.ox = 0; st.oy = 0; st.anchor = null;
     if (canvasEl) { clearInline(); paint(); }
   }
@@ -338,6 +345,7 @@
     e.preventDefault();                          // no browser autoscroll circle
     e.stopPropagation();                         // the game must not start its middle action
     st.target = st.ln;                           // stop any zoom animation in progress
+    st.active = false;
     st.anchor = null;
     pan = { lx: e.clientX, ly: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
     canvasEl.classList.add("swzp-panning");
@@ -489,11 +497,45 @@
     runEveryTick(function () { maxPixelCount = UNLIMITED; });   // fallback if the property is locked
   }
 
+  /* ===================================================================== */
+  /*  Part 4: keep zoom/pan smooth on heavy scenes                          */
+  /* ===================================================================== */
+
+  // The game redraws EVERY pixel on EVERY frame while paused (and on every tick
+  // while running). With tens of thousands of pixels that is 50ms+ per frame, which
+  // is what made zooming crawl. While the view is being zoomed or panned the pixels
+  // themselves do not change, so we let the game re-use the last drawn pixel layer.
+  // It redraws normally the moment the movement stops, or if you paint meanwhile.
+  function viewIsMoving() {
+    return st.ln !== st.target || (pan !== null && pan.moved) || sliderDragging;
+  }
+
+  function wrapDrawPixels() {
+    if (typeof drawPixels !== "function" || drawPixels.__swzp) return;
+    const original = drawPixels;
+    let drawnW = -1, drawnH = -1, drawnCount = -1;
+    const wrapped = function () {
+      let skip = false;
+      try {
+        const layer = canvasLayers.pixels;
+        skip = viewIsMoving() && drawnW === layer.width && drawnH === layer.height &&
+               drawnCount === currentPixels.length && mouseIsDown === false && !hiding;
+      } catch (_) { skip = false; }
+      if (skip) return true;
+      const r = original.apply(this, arguments);
+      try { drawnW = canvasLayers.pixels.width; drawnH = canvasLayers.pixels.height; drawnCount = currentPixels.length; } catch (_) { /* ignore */ }
+      return r;
+    };
+    wrapped.__swzp = true;
+    drawPixels = wrapped;
+  }
+
   runAfterLoad(function () {
     // Runs at the start of the game's onload: before the settings are applied
     // to the dropdowns, so a saved "Even Wider" choice is restored correctly.
     try { settings.limitless = 1; if (typeof refreshMaxPixels === "function") refreshMaxPixels(); }
     catch (_) { /* ignore */ }
+    wrapDrawPixels();
     addSizeOption();
     canvasEl = document.getElementById("game");
     viewEl = document.getElementById("canvasDiv");
