@@ -20,6 +20,9 @@
   var origRenderer = {};   // element -> original renderer (or undefined)
   var fast = {};           // element -> true when the fast path is installed
   var colorCache = new Map();
+  var hexOf = new Map();
+  var groups = new Map(), used = [];
+  var drawMode = "batch"; // "batch" (one path per colour), "image" (one off-screen image) or "off" (game's own drawing)
 
   // --- framebuffer -------------------------------------------------
   var off = null, offCtx = null, img = null, buf32 = null, dirty = [], cw = 0, ch = 0;
@@ -48,10 +51,29 @@
     }
     v = le ? ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0 : (((r << 24) | (g << 16) | (b << 8) | 255) >>> 0);
     colorCache.set(c, v);
+    hexOf.set(v, "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1));
     if (colorCache.size > 50000) colorCache.clear();
     return v;
   }
+  function flushBatch(ctx) {
+    var ps = pixelSize, ga = ctx.globalAlpha;
+    if (ga !== 1) ctx.globalAlpha = 1;
+    for (var g = 0; g < used.length; g++) {
+      var grp = used[g], idxs = grp.idx;
+      ctx.fillStyle = grp.hex;
+      ctx.beginPath();
+      for (var i = 0; i < idxs.length; i++) {
+        var k = idxs[i], y = (k / cw) | 0;
+        ctx.rect((k - y * cw) * ps, y * ps, ps, ps);
+      }
+      ctx.fill();
+      idxs.length = 0;
+    }
+    used.length = 0;
+    if (ga !== 1) ctx.globalAlpha = ga;
+  }
   function flush(ctx) {
+    if (used.length) flushBatch(ctx);
     if (!dirty.length) return;
     offCtx.putImageData(img, 0, 0);
     for (var i = 0; i < dirty.length; i++) buf32[dirty[i]] = 0;
@@ -62,6 +84,8 @@
     ctx.imageSmoothingEnabled = sm; ctx.globalAlpha = ga;
   }
   function discard() { // forget anything left from an aborted frame
+    for (var g = 0; g < used.length; g++) used[g].idx.length = 0;
+    used.length = 0;
     for (var i = 0; i < dirty.length; i++) buf32[dirty[i]] = 0;
     dirty.length = 0;
   }
@@ -81,7 +105,7 @@
   function render(name, pixel, ctx) {
     {
       var info = elements[name];
-      if (on && view === 1 && pixelSize === (pixelSize | 0) && !pixel.charge && !pixel.glow && info.glow !== true &&
+      if (on && drawMode !== "off" && view === 1 && pixelSize === (pixelSize | 0) && !pixel.charge && !pixel.glow && info.glow !== true &&
           (pixel.alpha === undefined || pixel.alpha === 1)) {
         var ok = true;
         if (name === "rock_wall") { // same test the game's HEATGLOW uses: only draw the plain colour when no glow overlay would show
@@ -93,7 +117,14 @@
           ensure();
           if (c !== 0 && pixel.x >= 0 && pixel.y >= 0 && pixel.x < cw && pixel.y < ch) {
             var idx = pixel.y * cw + pixel.x;
-            buf32[idx] = c; dirty.push(idx); hits++;
+            if (drawMode === "image") { buf32[idx] = c; dirty.push(idx); }
+            else {
+              var grp = groups.get(c);
+              if (grp === undefined) { grp = { hex: hexOf.get(c), idx: [] }; groups.set(c, grp); }
+              if (grp.idx.length === 0) used.push(grp);
+              grp.idx.push(idx);
+            }
+            hits++;
             return;
           }
         }
@@ -109,8 +140,8 @@
   function wrapDraw() {
     if (wrapped) return; wrapped = true;
     var ds = window.drawSquare, dp = window.drawPlus;
-    window.drawSquare = function (ctx) { if (dirty.length) flush(ctx); return ds.apply(this, arguments); };
-    window.drawPlus = function (ctx) { if (dirty.length) flush(ctx); return dp.apply(this, arguments); };
+    window.drawSquare = function (ctx) { if (dirty.length || used.length) flush(ctx); return ds.apply(this, arguments); };
+    window.drawPlus = function (ctx) { if (dirty.length || used.length) flush(ctx); return dp.apply(this, arguments); };
   }
   function install() {
     NAMES.forEach(function (n) {
@@ -182,14 +213,45 @@
   renderPrePixel(function () { discard(); });
   renderPostPixel(function (ctx) { flush(ctx); });
 
+  // --- self tuning ---------------------------------------------------
+  // Different browsers/GPUs draw differently fast, so the mod times its own drawing
+  // methods once on your machine and keeps the fastest one (it never keeps a slower one
+  // than the game's own drawing).
+  function syncTime(f, n) {
+    var cx = canvasLayers.pixels.getContext("2d");
+    f(); cx.getImageData(0, 0, 1, 1);                  // warm up + wait for the GPU
+    var s = performance.now();
+    for (var i = 0; i < n; i++) { f(); cx.getImageData(0, 0, 1, 1); }
+    return (performance.now() - s) / n;
+  }
+  var tuned = false, tuneResult = null;
+  function tune() {
+    var was = drawMode, res = {};
+    ["batch", "image", "off"].forEach(function (m) {
+      drawMode = m; res[m] = +Math.min(syncTime(function () { drawPixels(); }, 4), syncTime(function () { drawPixels(); }, 4)).toFixed(1);
+    });
+    var best = "off";
+    ["batch", "image", "off"].forEach(function (m) { if (res[m] < res[best]) best = m; });
+    drawMode = best; tuneResult = { draw_ms: res, chosen: best };
+    console.log("[sandboxelsPerf] drawing methods (ms/frame): ", res, "-> using", best);
+    return tuneResult;
+  }
+  var frameHits = 0;
+  renderPrePixel(function () { frameHits = hits; });
+  renderPostPixel(function () {
+    if (!tuned && hits - frameHits > 2000) { tuned = true; setTimeout(function () { try { tune(); } catch (e) { guard(e, "tune"); } }, 400); }
+  });
+
   window.sandboxelsPerf = {
     enable: function (v) { on = v !== false; return on; },
     isOn: function () { return on; },
-    stats: function () { return { on: on, fastPixels: hits, fallbackPixels: misses, errors: errors, pixelSize: pixelSize, view: view }; },
+    stats: function () { return { on: on, drawMode: drawMode, tuning: tuneResult, fastPixels: hits, fallbackPixels: misses, errors: errors, pixelSize: pixelSize, view: view }; },
+    tune: tune,
+    setDrawMode: function (m) { drawMode = m; return drawMode; },
     // Times the game with the mod on and off in YOUR browser (advances the simulation a few ticks).
     benchmark: function () {
       var was = on, out = {};
-      function t(f, n) { f(); var s = performance.now(); for (var i = 0; i < n; i++) f(); return +((performance.now() - s) / n).toFixed(1); }
+      function t(f, n) { return +syncTime(f, n).toFixed(1); }
       for (var round = 0; round < 2; round++) [true, false].forEach(function (m) {
         on = m;
         var key = m ? "mod_on" : "mod_off", d = t(function () { drawPixels(); }, 5), k = t(function () { tickPixels(); }, 3);
