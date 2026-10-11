@@ -66,8 +66,20 @@
     dirty.length = 0;
   }
 
+  var hits = 0, misses = 0, errors = 0;
+  function guard(e, where) {
+    errors++;
+    if (errors === 1) console.warn("[sandboxelsPerf] error in " + where + ", mod switched off:", e);
+    on = false;
+  }
   function makeRenderer(name) {
     return function (pixel, ctx) {
+      try { return render(name, pixel, ctx); } catch (e) { guard(e, "renderer"); discard(); }
+      var o = origRenderer[name]; if (o) o(pixel, ctx); else viewInfo[view].pixel(pixel, ctx);
+    };
+  }
+  function render(name, pixel, ctx) {
+    {
       var info = elements[name];
       if (on && view === 1 && pixelSize === (pixelSize | 0) && !pixel.charge && !pixel.glow && info.glow !== true &&
           (pixel.alpha === undefined || pixel.alpha === 1)) {
@@ -81,14 +93,15 @@
           ensure();
           if (c !== 0 && pixel.x >= 0 && pixel.y >= 0 && pixel.x < cw && pixel.y < ch) {
             var idx = pixel.y * cw + pixel.x;
-            buf32[idx] = c; dirty.push(idx);
+            buf32[idx] = c; dirty.push(idx); hits++;
             return;
           }
         }
       }
+      misses++;
       var o = origRenderer[name];
       if (o) o(pixel, ctx); else viewInfo[view].pixel(pixel, ctx);
-    };
+    }
   }
 
   // --- install -----------------------------------------------------
@@ -172,5 +185,17 @@
   window.sandboxelsPerf = {
     enable: function (v) { on = v !== false; return on; },
     isOn: function () { return on; },
+    stats: function () { return { on: on, fastPixels: hits, fallbackPixels: misses, errors: errors, pixelSize: pixelSize, view: view }; },
+    // Times the game with the mod on and off in YOUR browser (advances the simulation a few ticks).
+    benchmark: function () {
+      var was = on, out = {};
+      function t(f, n) { f(); var s = performance.now(); for (var i = 0; i < n; i++) f(); return +((performance.now() - s) / n).toFixed(1); }
+      for (var round = 0; round < 2; round++) [true, false].forEach(function (m) {
+        on = m;
+        var key = m ? "mod_on" : "mod_off", d = t(function () { drawPixels(); }, 5), k = t(function () { tickPixels(); }, 3);
+        if (!out[key] || d + k < out[key].draw_ms + out[key].tick_ms) out[key] = { draw_ms: d, tick_ms: k };
+      });
+      on = was; console.table(out); return out;
+    },
   };
 })();
