@@ -497,67 +497,11 @@
     runEveryTick(function () { maxPixelCount = UNLIMITED; });   // fallback if the property is locked
   }
 
-  /* ===================================================================== */
-  /*  Part 4: keep zoom/pan smooth on heavy scenes                          */
-  /* ===================================================================== */
-
-  // The game redraws EVERY pixel on EVERY frame while paused (and on every tick
-  // while running). With tens of thousands of pixels that is 50ms+ per frame, which
-  // is what made zooming crawl. While the view is being zoomed or panned the pixels
-  // themselves do not change, so we let the game re-use the last drawn pixel layer.
-  // It redraws normally the moment the movement stops, or if you paint meanwhile.
-  function viewIsMoving() {
-    return st.ln !== st.target || (pan !== null && pan.moved) || sliderDragging;
-  }
-
-  // The game CLEARS the pixel layer and then REDRAWS it, every frame while paused.
-  // Skipping only the redraw would leave the layer empty (pixels vanish), so the
-  // clear and the redraw must be skipped together, using one shared decision.
-  let drawnW = -1, drawnH = -1, drawnCount = -1;
-
-  function canReuseLayer() {
-    try {
-      const layer = canvasLayers.pixels;
-      return viewIsMoving() && drawnW === layer.width && drawnH === layer.height &&
-             drawnCount === currentPixels.length && mouseIsDown === false && !hiding;
-    } catch (_) { return false; }
-  }
-
-  function wrapDrawing() {
-    if (typeof drawPixels === "function" && !drawPixels.__swzp) {
-      const origDraw = drawPixels;
-      const wrappedDraw = function () {
-        if (canReuseLayer()) return true;              // keep the layer exactly as it is
-        const r = origDraw.apply(this, arguments);
-        try { drawnW = canvasLayers.pixels.width; drawnH = canvasLayers.pixels.height; drawnCount = currentPixels.length; } catch (_) { /* ignore */ }
-        return r;
-      };
-      wrappedDraw.__swzp = true;
-      drawPixels = wrappedDraw;
-    }
-    if (typeof clearLayers === "function" && !clearLayers.__swzp) {
-      const origClear = clearLayers;
-      const wrappedClear = function () {
-        if (!canReuseLayer()) return origClear.apply(this, arguments);
-        // same as the game's own clear, except the pixel layer is left untouched
-        const keys = Object.keys(canvasLayers);
-        for (let i = 0; i < keys.length; i++) {
-          const layerCanvas = canvasLayers[keys[i]];
-          if (layerCanvas === canvasLayers.pixels) continue;
-          layerCanvas.getContext("2d").clearRect(0, 0, layerCanvas.width, layerCanvas.height);
-        }
-      };
-      wrappedClear.__swzp = true;
-      clearLayers = wrappedClear;
-    }
-  }
-
   runAfterLoad(function () {
     // Runs at the start of the game's onload: before the settings are applied
     // to the dropdowns, so a saved "Even Wider" choice is restored correctly.
     try { settings.limitless = 1; if (typeof refreshMaxPixels === "function") refreshMaxPixels(); }
     catch (_) { /* ignore */ }
-    wrapDrawing();
     addSizeOption();
     canvasEl = document.getElementById("game");
     viewEl = document.getElementById("canvasDiv");
