@@ -217,29 +217,40 @@
   // Different browsers/GPUs draw differently fast, so the mod times its own drawing
   // methods once on your machine and keeps the fastest one (it never keeps a slower one
   // than the game's own drawing).
-  function syncTime(f, n) {
-    var cx = canvasLayers.pixels.getContext("2d");
-    f(); cx.getImageData(0, 0, 1, 1);                  // warm up + wait for the GPU
-    var s = performance.now();
-    for (var i = 0; i < n; i++) { f(); cx.getImageData(0, 0, 1, 1); }
+  function plainTime(f, n) { // CPU time only, no canvas readbacks (those can push a canvas onto the slow software path)
+    f(); var s = performance.now();
+    for (var i = 0; i < n; i++) f();
     return (performance.now() - s) / n;
   }
-  var tuned = false, tuneResult = null;
-  function tune() {
-    var was = drawMode, res = {};
-    ["batch", "image", "off"].forEach(function (m) {
-      drawMode = m; res[m] = +Math.min(syncTime(function () { drawPixels(); }, 4), syncTime(function () { drawPixels(); }, 4)).toFixed(1);
-    });
-    var best = "off";
-    ["batch", "image", "off"].forEach(function (m) { if (res[m] < res[best]) best = m; });
-    drawMode = best; tuneResult = { draw_ms: res, chosen: best };
-    console.log("[sandboxelsPerf] drawing methods (ms/frame): ", res, "-> using", best);
-    return tuneResult;
+  // Measures real frame times (includes GPU work) for each drawing method, a second or so each.
+  var tuned = false, tuneResult = null, tuning = false;
+  function tune(done) {
+    if (tuning) return; tuning = true;
+    var modes = ["batch", "image", "off"], res = {}, was = drawMode, mi = 0;
+    function runMode() {
+      if (mi >= modes.length) {
+        var best = "off";
+        modes.forEach(function (m) { if (res[m] < res[best] * 0.97) best = m; }); // must win by 3% to replace the game's own drawing
+        if (res.off <= 17.5 && res[best] > 17.5) best = "off";
+        drawMode = best; tuneResult = { frame_ms: res, chosen: best }; tuning = false;
+        console.log("[sandboxelsPerf] frame time per drawing method (ms):", res, "-> using", best);
+        if (done) done(tuneResult); return;
+      }
+      var m = modes[mi]; drawMode = m;
+      var n = 0, t0 = 0, warm = 8, total = 40;
+      (function frame(t) {
+        n++;
+        if (n === warm) t0 = t;
+        if (n < warm + total) return requestAnimationFrame(frame);
+        res[m] = +((t - t0) / total).toFixed(1); mi++; runMode();
+      })(performance.now());
+    }
+    runMode();
   }
   var frameHits = 0;
   renderPrePixel(function () { frameHits = hits; });
   renderPostPixel(function () {
-    if (!tuned && hits - frameHits > 2000) { tuned = true; setTimeout(function () { try { tune(); } catch (e) { guard(e, "tune"); } }, 400); }
+    if (!tuned && hits - frameHits > 2000) { tuned = true; setTimeout(function () { try { tune(); } catch (e) { tuning = false; guard(e, "tune"); } }, 600); }
   });
 
   window.sandboxelsPerf = {
@@ -248,10 +259,10 @@
     stats: function () { return { on: on, drawMode: drawMode, tuning: tuneResult, fastPixels: hits, fallbackPixels: misses, errors: errors, pixelSize: pixelSize, view: view }; },
     tune: tune,
     setDrawMode: function (m) { drawMode = m; return drawMode; },
-    // Times the game with the mod on and off in YOUR browser (advances the simulation a few ticks).
+    // CPU time of the game with the mod on and off in YOUR browser (advances the simulation a few ticks).
     benchmark: function () {
       var was = on, out = {};
-      function t(f, n) { return +syncTime(f, n).toFixed(1); }
+      function t(f, n) { return +plainTime(f, n).toFixed(1); }
       for (var round = 0; round < 2; round++) [true, false].forEach(function (m) {
         on = m;
         var key = m ? "mod_on" : "mod_off", d = t(function () { drawPixels(); }, 5), k = t(function () { tickPixels(); }, 3);
